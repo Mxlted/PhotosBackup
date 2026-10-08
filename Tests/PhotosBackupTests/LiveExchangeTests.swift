@@ -18,7 +18,6 @@ final class LiveExchangeTests: XCTestCase {
             // The point of the probe: the request reached Google and we parsed a
             // real rejection, rather than crashing on our own request building.
             XCTAssertEqual(f.stage, "master token")
-            print("LIVE master-token rejection: \(f.message)")
         }
     }
 
@@ -28,9 +27,6 @@ final class LiveExchangeTests: XCTestCase {
             throw XCTSkip("set GPMC_OAUTH_TOKEN to a fresh accounts.google.com oauth_token")
         }
         let result = try await TokenExchange.run(oauthToken: token)
-        print("LIVE account: \(result.email)")
-        print("LIVE master token prefix: \(result.masterToken.prefix(8))")
-        print("LIVE photos token prefix: \(result.photosAccessToken.prefix(8))")
         XCTAssertFalse(result.masterToken.isEmpty)
         XCTAssertFalse(result.photosAccessToken.isEmpty || result.encrypted)
 
