@@ -43,7 +43,8 @@ without a desktop companion or hosted service.
 - Upload in original quality or request Google's Storage Saver processing.
 - Choose how many uploads run at once, from 1 to 10.
 - Keep the app awake with **Black Screen Mode** on Home or Activity: a black
-  background, dim gray backup counts and pause status, and slowly shifting text.
+  background, dim gray backup counts and status that move between screen regions,
+  or an entirely blank screen. Tap anywhere for details and controls.
 - Enforce Wi-Fi-only or Wi-Fi-and-cellular policy at queue and request level,
   cancelling in-flight background transfers when the allowed transport is lost.
 - Keep backing up after you leave the app, on iOS 26 and later. While the app
@@ -101,13 +102,19 @@ claims to come from.
 
 Start **Back Up Now** or queue photos, then tap **Black Screen Mode** on Home or
 Activity. The app prevents auto-lock while this mode is visible and the app is
-active. It stays black even after the queue finishes or pauses. **Exit Black
-Screen** restores normal auto-lock without stopping uploads; leaving the app
-also releases the override. The phone is still on and unlocked. OLED displays
+active. Only compact statistics appear, jumping between six screen regions once
+a minute without animation (or staying centered with Reduce Motion enabled).
+Tap anywhere to see full status, pause reasons, and controls. **Return to Black
+Screen** restores the minimal view. Turn off **Show Status in Black Screen Mode**
+for a completely blank resting screen, then tap anywhere to show details again.
+This preference is saved for future sessions. It stays black even after the
+queue finishes or pauses. **Exit Black Screen** restores normal auto-lock
+without stopping uploads; leaving the app also releases the override. The phone
+is still on and unlocked. OLED displays
 benefit from the black background; LCD displays still use a backlight. Screen
 brightness is not changed, so you can lower it yourself in Control Center.
 
-The screen shows the account's remembered backed-up total, unfinished queue
+The details view shows the account's remembered backed-up total, unfinished queue
 count, failures, queue progress, and pause reasons. A clear queue does not mean
 unselected or unscanned albums are backed up. System overlays are hidden on
 iOS 16+; iOS 15 may still show its home indicator.

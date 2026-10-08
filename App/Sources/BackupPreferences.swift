@@ -33,6 +33,7 @@ final class BackupPreferences: ObservableObject {
         static let storageSaver = "backup.storageSaver"
         static let useQuota = "backup.useQuota"
         static let backUpLivePhotoMotion = "backup.livePhotoMotion"
+        static let showBlackScreenStatus = "backup.showBlackScreenStatus"
     }
 
     @Published var selectedAlbumIDs: Set<String> { didSet { saveAlbumIDs() } }
@@ -43,6 +44,7 @@ final class BackupPreferences: ObservableObject {
     @Published var storageSaver: Bool { didSet { defaults.set(storageSaver, forKey: Key.storageSaver) } }
     @Published var useQuota: Bool { didSet { defaults.set(useQuota, forKey: Key.useQuota) } }
     @Published var backUpLivePhotoMotion: Bool { didSet { defaults.set(backUpLivePhotoMotion, forKey: Key.backUpLivePhotoMotion) } }
+    @Published var showBlackScreenStatus: Bool { didSet { defaults.set(showBlackScreenStatus, forKey: Key.showBlackScreenStatus) } }
 
     private let defaults: UserDefaults
 
@@ -62,6 +64,7 @@ final class BackupPreferences: ObservableObject {
         // Photo already backed up, a few MB each, which an update should not
         // start on its own.
         backUpLivePhotoMotion = defaults.bool(forKey: Key.backUpLivePhotoMotion)
+        showBlackScreenStatus = defaults.object(forKey: Key.showBlackScreenStatus) as? Bool ?? true
     }
 
     func toggle(albumID: String) {

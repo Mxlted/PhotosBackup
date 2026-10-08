@@ -74,7 +74,7 @@ struct BlackScreenBackupControls: View {
             .foregroundStyle(BackupTheme.blue)
             .accessibilityHint("Shows dim backup progress and prevents auto-lock while the app stays open")
 
-            Text("Keeps this app awake while queued uploads continue, with dim text on a black screen.")
+            Text("Keeps this app awake with dim statistics or a completely black screen. Tap anywhere in the mode for details and controls.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
@@ -94,8 +94,11 @@ struct BlackScreenBackupView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var account: PhotosAccount
     @EnvironmentObject private var queue: UploadQueue
+    @EnvironmentObject private var preferences: BackupPreferences
     @StateObject private var awakeSession = BlackScreenAwakeSession()
     @State private var isVisible = false
+    @State private var showingDetails = false
+    @ScaledMetric(relativeTo: .caption) private var statisticsWidth: CGFloat = 210
 
     private let textColor = Color(white: 0.55)
     private let secondaryTextColor = Color(white: 0.48)
@@ -104,43 +107,10 @@ struct BlackScreenBackupView: View {
         GeometryReader { geometry in
             ZStack {
                 Color.black.ignoresSafeArea()
-                // A slow, nonanimated shift avoids leaving text on exactly the
-                // same pixels throughout a long session. No per-frame timer.
-                TimelineView(.periodic(from: .now, by: 60)) { context in
-                    ScrollView(showsIndicators: false) {
-                        VStack(spacing: 28) {
-                            statusSummary
-                            metrics
-
-                            if queue.activeCount > 0 {
-                                Text("Current queue: \(queue.overallFraction.formatted(.percent.precision(.fractionLength(0))))")
-                                    .font(.footnote.monospacedDigit())
-                            }
-
-                            if let warning = queue.persistenceWarning {
-                                Text(warning)
-                                    .font(.footnote)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-
-                            VStack(spacing: 12) {
-                                Text("App stays awake until you exit this mode.\nKeep Photos Backup open and your phone unlocked.")
-                                    .font(.footnote)
-                                    .foregroundStyle(secondaryTextColor)
-                                Button("Exit Black Screen") { dismiss() }
-                                    .font(.body.weight(.medium))
-                                    .frame(minHeight: 44)
-                                    .padding(.horizontal, 18)
-                                    .overlay(Capsule().stroke(Color(white: 0.2), lineWidth: 1))
-                                    .buttonStyle(.plain)
-                                    .accessibilityHint("Returns to the app without stopping backup")
-                            }
-                        }
-                        .frame(maxWidth: 420)
-                        .padding(32)
-                        .frame(maxWidth: .infinity, minHeight: geometry.size.height)
-                        .offset(shift(at: context.date))
-                    }
+                if showingDetails {
+                    details(minHeight: geometry.size.height)
+                } else {
+                    restingScreen(size: geometry.size)
                 }
             }
         }
@@ -161,13 +131,114 @@ struct BlackScreenBackupView: View {
         }
     }
 
+    private func restingScreen(size: CGSize) -> some View {
+        ZStack {
+            if preferences.showBlackScreenStatus {
+                // Move across whole regions without animating across the screen.
+                // Removing this subtree in blank mode also removes the timer.
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(status.title).fontWeight(.medium)
+                        Text("\(queue.completedSourceCount.formatted()) backed up")
+                        Text("\(queue.activeCount.formatted()) in queue")
+                        Text("\(queue.failedCount.formatted()) need attention")
+                    }
+                    .font(.caption.monospacedDigit())
+                    // Keep the glanceable block compact even at accessibility
+                    // sizes. Tapping opens full-size, scrollable details.
+                    .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: min(statisticsWidth, max(0, size.width - 48)), alignment: .leading)
+                    .padding(24)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: region(at: context.date))
+                    .accessibilityHidden(true)
+                }
+            }
+
+            // A separate invisible button covers the safe areas too. The same
+            // tap target works when every status pixel has been turned off.
+            Button { showingDetails = true } label: {
+                Color.clear.contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .ignoresSafeArea()
+            .accessibilityLabel("Show backup details")
+            .accessibilityValue(preferences.showBlackScreenStatus
+                ? "\(status.title). \(queue.completedSourceCount) backed up, \(queue.activeCount) in queue, \(queue.failedCount) need attention."
+                : "Screen is blank. Backup stays active.")
+            .accessibilityHint("Shows backup progress, display options, and the exit button")
+            .accessibilityIdentifier("blackScreen.wake")
+        }
+    }
+
+    private func details(minHeight: CGFloat) -> some View {
+        ScrollView(showsIndicators: false) {
+            VStack(spacing: 28) {
+                statusSummary
+                metrics
+
+                if queue.activeCount > 0 {
+                    Text("Current queue: \(queue.overallFraction.formatted(.percent.precision(.fractionLength(0))))")
+                        .font(.footnote.monospacedDigit())
+                }
+
+                if let warning = queue.persistenceWarning {
+                    Text(warning)
+                        .font(.footnote)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("Show Status in Black Screen Mode", isOn: $preferences.showBlackScreenStatus)
+                        .font(.subheadline)
+                        .tint(Color(white: 0.32))
+                        .accessibilityIdentifier("blackScreen.showStatus")
+                    Text("When off, returning to black screen hides all text. Tap anywhere to show details again.")
+                        .font(.footnote)
+                        .foregroundStyle(secondaryTextColor)
+                }
+                .multilineTextAlignment(.leading)
+
+                VStack(spacing: 12) {
+                    Text("App stays awake until you exit this mode.\nKeep Photos Backup open and your phone unlocked.")
+                        .font(.footnote)
+                        .foregroundStyle(secondaryTextColor)
+                    Button { showingDetails = false } label: {
+                        Text("Return to Black Screen")
+                            .font(.body.weight(.medium))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .contentShape(Rectangle())
+                            .overlay(Capsule().stroke(Color(white: 0.2), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("blackScreen.return")
+                    Button { dismiss() } label: {
+                        Text("Exit Black Screen")
+                            .font(.body.weight(.medium))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Returns to the app without stopping backup")
+                    .accessibilityIdentifier("blackScreen.exit")
+                }
+            }
+            .frame(maxWidth: 420)
+            .padding(32)
+            .frame(maxWidth: .infinity, minHeight: minHeight)
+        }
+    }
+
+    private var status: BlackScreenBackupStatus {
+        BlackScreenBackupStatus(accountUsable: account.status.isUsable,
+                                pauseReason: queue.pauseReason,
+                                remaining: queue.activeCount,
+                                failed: queue.failedCount,
+                                waitingForICloud: queue.deferredForICloudCount)
+    }
+
     private var statusSummary: some View {
-        let status = BlackScreenBackupStatus(accountUsable: account.status.isUsable,
-                                             pauseReason: queue.pauseReason,
-                                             remaining: queue.activeCount,
-                                             failed: queue.failedCount,
-                                             waitingForICloud: queue.deferredForICloudCount)
-        return VStack(spacing: 12) {
+        VStack(spacing: 12) {
             Text("BLACK SCREEN MODE")
                 .font(.caption.weight(.medium))
                 .tracking(2)
@@ -198,13 +269,15 @@ struct BlackScreenBackupView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func shift(at date: Date) -> CGSize {
-        guard !reduceMotion else { return .zero }
-        switch Int(date.timeIntervalSinceReferenceDate / 60) % 4 {
-        case 0: return CGSize(width: -6, height: -6)
-        case 1: return CGSize(width: 6, height: -6)
-        case 2: return CGSize(width: 6, height: 6)
-        default: return CGSize(width: -6, height: 6)
+    private func region(at date: Date) -> Alignment {
+        guard !reduceMotion else { return .center }
+        switch Int(date.timeIntervalSinceReferenceDate / 60) % 6 {
+        case 0: return .topLeading
+        case 1: return .bottomTrailing
+        case 2: return .leading
+        case 3: return .topTrailing
+        case 4: return .bottomLeading
+        default: return .trailing
         }
     }
 
@@ -230,7 +303,7 @@ private struct BackupSessionTipsView: View {
         NavigationView {
             List {
                 Section("Before you leave") {
-                    tip("Start the backup first", "Use Back Up Now or queue photos, then enter Black Screen Mode. It keeps the app awake even when the queue is paused or finished; exit the mode to restore normal auto-lock.")
+                    tip("Start the backup first", "Use Back Up Now or queue photos, then enter Black Screen Mode. It keeps the app awake even when the queue is paused or finished. Tap anywhere for details, the option to hide all status, or the exit button. Exit the mode to restore normal auto-lock.")
                     tip("Use power and reliable Wi-Fi", "Plug in your phone, use a strong Wi-Fi connection, and leave it on a cool, uncovered surface. Lower screen brightness in Control Center if needed. Black pixels save display power on OLED screens; the phone remains on and unlocked.")
                     tip("Avoid power and data restrictions", "For a large backup, turn off Low Power Mode and Low Data Mode for the network you use. These settings can restrict background activity and iCloud Photos updates.")
                 }
