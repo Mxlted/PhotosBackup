@@ -77,8 +77,8 @@ The Xcode project, app target, and scheme are named `PhotosBackup`; the
 user-facing app is named **Photos Backup**.
 
 Latest release: **0.3.8** ([releases](https://github.com/Mxlted/PhotosBackup/releases)).
-Every push and pull request runs the offline suite on an iPhone simulator.
-The 2 opt-in live tests are skipped unless explicitly enabled.
+Every push to `main` and pull request runs protocol tests on macOS and the
+offline suite on an iPhone simulator. CI explicitly excludes the 2 live tests.
 
 Each release's `.ipa` is built by GitHub Actions from the tagged commit and
 attached with its SHA-256, so the binary can be checked against the source it
@@ -358,22 +358,39 @@ in `Tests/GPMCCoreTests`. The same tests also run in the iOS suite. Run the full
 simulator suite for app changes; the package does not cover PhotoKit, Keychain,
 the upload queue, or background execution.
 
-Run the offline unit test suite against any installed simulator:
+Run the full offline suite using the same command as CI:
 
 ```sh
-xcodebuild \
-  -project PhotosBackup.xcodeproj \
-  -scheme PhotosBackup \
-  -destination 'platform=iOS Simulator,name=<your simulator>' \
-  CODE_SIGNING_ALLOWED=NO \
-  test
+./Scripts/test.sh
 ```
 
-List available simulator names with:
+The script checks Xcode, regenerates the project, chooses an available iPhone
+simulator by UUID, and explicitly excludes live Google tests. It keeps simulator
+signing enabled for Keychain coverage; do not pass `CODE_SIGNING_ALLOWED=NO` to
+test runs. No paid signing identity is needed for local simulator signing.
+Build output and an Xcode result bundle are saved in a new
+`build/test-results/run.*` directory on every run. CI uploads these artifacts
+for seven days, including on failure.
+
+To choose a simulator explicitly:
 
 ```sh
 xcrun simctl list devices available
+./Scripts/test.sh <simulator-uuid>
 ```
+
+For a focused test while iterating, use Xcode's test navigator or:
+
+```sh
+xcodegen generate
+xcodebuild test \
+  -project PhotosBackup.xcodeproj \
+  -scheme PhotosBackup \
+  -destination 'platform=iOS Simulator,id=<simulator-uuid>' \
+  -only-testing:PhotosBackupTests/UploadQueueTests
+```
+
+The shared script always runs the complete offline suite.
 
 Live tests are opt-in because they contact Google. The full exchange test also
 requires a fresh, single-use `oauth_token`:
@@ -405,6 +422,8 @@ App/Resources/                Info.plist and app icon assets
 App/Sources/AccountConnectWebView.swift       In-app EmbeddedSetup web view
 GPMC/Core/                    Photos protocol client and protobuf helpers
 Tests/PhotosBackupTests/      Offline unit tests and gated live tests
+Tests/GPMCCoreTests/          Protocol fixtures shared by SwiftPM and iOS tests
+Scripts/test.sh               Offline simulator gate used locally and in CI
 Scripts/make-ipa.sh           Unsigned IPA packaging
 docs/                         Feasibility log and authentication ADR
 project.yml                   XcodeGen project definition

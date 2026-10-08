@@ -35,43 +35,17 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
-      - name: Generate the project
-        run: xcodegen generate
+      - name: Test protocol core on macOS
+        run: swift test
 
-      # Runner images rename their simulators between releases, so the device
-      # is read from what is installed instead of naming one that may be gone
-      # after an image bump. Only iOS runtimes list an iPhone.
-      - name: Pick a simulator
-        run: |
-          name="$(xcrun simctl list devices available \
-            | sed -n 's/^ *\(iPhone [^(]*\) (.*/\1/p' \
-            | sed 's/ *$//' | head -1)"
-          if [ -z "$name" ]; then
-            echo "::error::No iPhone simulator is available on this runner."
-            xcrun simctl list devices available >&2
-            exit 1
-          fi
-          echo "Testing on $name"
-          echo "SIMULATOR_NAME=$name" >> "$GITHUB_ENV"
+      - name: Test app on an iPhone simulator
+        run: Scripts/test.sh
 
-      - name: Test
-        run: |
-          set -o pipefail
-          xcodebuild test \
-            -project PhotosBackup.xcodeproj \
-            -scheme PhotosBackup \
-            -destination "platform=iOS Simulator,name=$SIMULATOR_NAME" \
-            2>&1 | tee build.log \
-            | grep -E "Test Suite .* (passed|failed)|Test Case .* failed|error:|\*\* TEST" || true
-          # The grep above swallows xcodebuild's status, and a run that never
-          # launches prints no summary at all, so the verdict is read back from
-          # the log itself.
-          grep -q '\*\* TEST SUCCEEDED \*\*' build.log
-
-      - name: Upload the log if it failed
-        if: failure()
+      - name: Upload test results and build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: xcodebuild-log
-          path: build.log
+          name: test-results
+          path: build/test-results/
           if-no-files-found: ignore
+          retention-days: 7
