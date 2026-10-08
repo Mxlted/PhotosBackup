@@ -347,6 +347,17 @@ Android master token → Photos access token → private Photos API
 
 ## Tests
 
+For a fast protocol check on macOS without launching a simulator:
+
+```sh
+swift test
+```
+
+This builds `GPMC/Core` and runs the wire-format and error-classification tests
+in `Tests/GPMCCoreTests`. The same tests also run in the iOS suite. Run the full
+simulator suite for app changes; the package does not cover PhotoKit, Keychain,
+the upload queue, or background execution.
+
 Run the offline unit test suite against any installed simulator:
 
 ```sh
