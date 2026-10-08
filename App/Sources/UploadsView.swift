@@ -4,6 +4,7 @@ struct UploadsView: View {
     @EnvironmentObject private var account: PhotosAccount
     @EnvironmentObject private var queue: UploadQueue
     @EnvironmentObject private var preferences: BackupPreferences
+    let onBlackScreen: () -> Void
     @State private var showPicker = false
     @State private var showingStopBackupConfirmation = false
     @State private var inspectedFailure: FailureDetail?
@@ -20,6 +21,10 @@ struct UploadsView: View {
         NavigationView {
             List {
                 manualBackupSection
+                Section {
+                    BlackScreenBackupControls(onStart: onBlackScreen)
+                        .padding(.vertical, 4)
+                }
                 if let reason = queue.pauseReason { pausedSection(reason) }
                 if let warning = queue.persistenceWarning { persistenceWarningSection(warning) }
                 if queue.items.isEmpty { emptySection }

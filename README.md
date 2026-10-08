@@ -42,6 +42,8 @@ without a desktop companion or hosted service.
   in-between version, so it is uploaded in addition to the finished edit.
 - Upload in original quality or request Google's Storage Saver processing.
 - Choose how many uploads run at once, from 1 to 10.
+- Keep the app awake with **Black Screen Mode** on Home or Activity: a black
+  background, dim gray backup counts and pause status, and slowly shifting text.
 - Enforce Wi-Fi-only or Wi-Fi-and-cellular policy at queue and request level,
   cancelling in-flight background transfers when the allowed transport is lost.
 - Keep backing up after you leave the app, on iOS 26 and later. While the app
@@ -94,6 +96,39 @@ claims to come from.
 > The bundle ID and Keychain service changed in 0.0.2. After updating from an
 > older build, reconnect the Google account once, then force-quit and reopen
 > to confirm it stays connected.
+
+## Long, unattended backups
+
+Start **Back Up Now** or queue photos, then tap **Black Screen Mode** on Home or
+Activity. The app prevents auto-lock while this mode is visible and the app is
+active. It stays black even after the queue finishes or pauses. **Exit Black
+Screen** restores normal auto-lock without stopping uploads; leaving the app
+also releases the override. The phone is still on and unlocked. OLED displays
+benefit from the black background; LCD displays still use a backlight. Screen
+brightness is not changed, so you can lower it yourself in Control Center.
+
+The screen shows the account's remembered backed-up total, unfinished queue
+count, failures, queue progress, and pause reasons. A clear queue does not mean
+unselected or unscanned albums are backed up. System overlays are hidden on
+iOS 16+; iOS 15 may still show its home indicator.
+
+**Tips for Long Backups**, beside the mode button, covers these preparations:
+
+- Plug in, use reliable Wi-Fi, and keep the phone cool and uncovered. Heat can
+  reduce performance ([Apple's temperature guidance](https://support.apple.com/en-us/118431)).
+- For backup throughput, leave [Low Power Mode](https://support.apple.com/en-us/101604)
+  and [Low Data Mode](https://support.apple.com/en-gb/102433) off. They restrict
+  background activity and can pause iCloud Photos updates.
+- Use a [Focus](https://support.apple.com/en-ie/105112) to reduce notification
+  interruptions. Pause competing downloads, streaming, and other photo backups;
+  optionally disable Background App Refresh for unrelated apps. Focus does not
+  reserve CPU or bandwidth, and Photos Backup cannot suspend other apps.
+- Optional: [Guided Access](https://support.apple.com/en-ie/111795) keeps the
+  phone in one app. Set its Display Auto-Lock to Never and learn the exit steps
+  first. Apple says emergency calls and Crash Detection are unavailable during
+  Guided Access.
+- If the phone warms up or uploads hit rate limits, reduce **Simultaneous
+  Uploads**. More parallel uploads are not always faster.
 
 ## Reporting a problem
 

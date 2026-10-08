@@ -29,12 +29,14 @@ struct ContentView: View {
 private struct MainAppView: View {
     @State private var selectedTab = 0
     @State private var showConnectionTutorial = false
+    @State private var showBlackScreen = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
             DashboardView(
                 onConnect: { showConnectionTutorial = true },
-                onAccount: { selectedTab = 3 }
+                onAccount: { selectedTab = 3 },
+                onBlackScreen: { showBlackScreen = true }
             )
                 .tabItem { Label("Home", systemImage: "house.fill") }
                 .tag(0)
@@ -43,7 +45,7 @@ private struct MainAppView: View {
                 .tabItem { Label("Albums", systemImage: "rectangle.stack.fill") }
                 .tag(1)
 
-            UploadsView()
+            UploadsView(onBlackScreen: { showBlackScreen = true })
                 .tabItem { Label("Activity", systemImage: "arrow.up.circle.fill") }
                 .tag(2)
 
@@ -56,6 +58,9 @@ private struct MainAppView: View {
         // whole Google sign-in has to be repeated.
         .fullScreenCover(isPresented: $showConnectionTutorial) {
             ConnectionTutorialView()
+        }
+        .fullScreenCover(isPresented: $showBlackScreen) {
+            BlackScreenBackupView()
         }
     }
 }

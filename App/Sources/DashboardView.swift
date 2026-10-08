@@ -10,6 +10,7 @@ struct DashboardView: View {
 
     let onConnect: () -> Void
     let onAccount: () -> Void
+    let onBlackScreen: () -> Void
     @State private var showPicker = false
     @State private var showingStopBackupConfirmation = false
     @State private var manualRunMessage: String?
@@ -34,6 +35,9 @@ struct DashboardView: View {
                     accountBanner
                     backupHero
                     quickActions
+                    BlackScreenBackupControls(onStart: onBlackScreen)
+                        .padding(20)
+                        .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     folderSummary
                     if !queue.items.isEmpty { recentActivity }
                 }
