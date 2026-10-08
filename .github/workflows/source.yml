@@ -14,10 +14,6 @@ concurrency:
   group: update-source
   cancel-in-progress: false
 
-env:
-  # Repository that publishes the releases this source tracks.
-  UPSTREAM_REPO: g8row/PhotosBackup
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,14 +28,9 @@ jobs:
       - name: Resolve source repository
         id: src
         run: |
-          # A release event only ever fires on the repository that owns the
-          # release, so that repository is authoritative. On a manual run from
-          # a fork there are no local releases, so fall back to upstream.
-          if [ "${{ github.event_name }}" = "release" ]; then
-            repo="${{ github.repository }}"
-          else
-            repo="${UPSTREAM_REPO}"
-          fi
+          # Manual updates and release events both track this repository.
+          # A fork's feed must not switch back to upstream on a manual run.
+          repo="${{ github.repository }}"
           echo "repo=$repo" >> "$GITHUB_OUTPUT"
           echo "Reading releases from $repo"
 
