@@ -490,8 +490,15 @@ final class AutomaticBackupCoordinator: ObservableObject {
             let run = AutomaticBackupRunHistory.started(.foreground, context: self.executionContext())
             await self.albums.refresh()
             if self.albums.canRead, !Task.isCancelled {
-                let sources = await self.albums.sources(for: self.preferences.selectedAlbumIDs)
-                if !Task.isCancelled { await self.performForegroundBackup(sources) }
+                let email = self.account.status.email
+                let selected = self.preferences.selectedAlbumIDs
+                let scan = await self.libraryChanges.scanAll(albums: self.albums, selectedAlbumIDs: selected,
+                                                            accountIdentifier: email)
+                if !Task.isCancelled, self.account.status.email == email,
+                   self.preferences.selectedAlbumIDs == selected {
+                    self.enqueueScan(scan)
+                    await self.performForegroundBackup(scan.sources)
+                }
             } else {
                 // Access was refused or not decided yet. Release the once-per
                 // foreground latch so granting it later still starts a scan.
@@ -523,8 +530,19 @@ final class AutomaticBackupCoordinator: ObservableObject {
         )
     }
 
-    /// Hand the whole selection to the queue, then stay alive while it drains so
-    /// assets the library gains mid-run are picked up without another tap.
+    /// All scan paths invalidate the same revisions before deduplication and
+    /// commit their baseline only after the queue has persisted the changes.
+    @discardableResult
+    private func enqueueScan(_ scan: PhotoLibraryChangeTracker.Scan, limit: Int? = nil) -> UploadQueue.EnqueueOutcome {
+        queue.invalidateChangedSources(scan.editedSources)
+        let outcome = queue.enqueueReportingLimit(scan.sources, skippingExisting: true, limit: limit)
+        if queue.persistenceWarning == nil {
+            libraryChanges.commit(scan, advanceToken: !outcome.reachedLimit)
+        }
+        return outcome
+    }
+
+    /// Hand the selection to the queue and wait while it drains.
     ///
     /// `manual` runs are the user asking right now, so they are not gated on
     /// `shouldSchedule`. That gate includes "Automatic Backup is turned off" —
@@ -535,22 +553,17 @@ final class AutomaticBackupCoordinator: ObservableObject {
         // Same reasoning as the background window: earlier transport failures
         // are invisible to the scan and nothing else releases them.
         queue.retryRetryableFailures()
-        while isForeground, !Task.isCancelled, account.status.isUsable,
-              manual || shouldSchedule, !isPausedForAnyReason {
-            let accepted = queue.enqueue(sources, skippingExisting: true)
-            if accepted.isEmpty { return }
-            // `hasWorkableItems`, not `activeCount`: rows parked on an iCloud
-            // download stay unfinished indefinitely, and waiting on them would
-            // hold this loop open long after the queue stopped moving.
-            while queue.hasWorkableItems {
-                // A pause the queue is honouring must end the loop too,
-                // otherwise this polls every 200 ms for as long as the user
-                // waits for Wi-Fi or leaves the backup paused.
-                if Task.isCancelled || !isForeground || !account.status.isUsable
-                    || !(manual || shouldSchedule)
-                    || queue.haltReason != nil || isPausedForAnyReason { return }
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
+        guard isForeground, !Task.isCancelled, account.status.isUsable,
+              manual || shouldSchedule, !isPausedForAnyReason else { return }
+        queue.enqueue(sources, skippingExisting: true)
+        // The scan already enqueued these sources. Even if dedup accepts no
+        // additional rows, the run must wait for the existing work to settle.
+        // iCloud-only rows do not hold a foreground run open indefinitely.
+        while queue.hasWorkableItems {
+            if Task.isCancelled || !isForeground || !account.status.isUsable
+                || !(manual || shouldSchedule)
+                || queue.haltReason != nil || isPausedForAnyReason { return }
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
     }
 
@@ -576,15 +589,20 @@ final class AutomaticBackupCoordinator: ObservableObject {
         guard !preferences.selectedAlbumIDs.isEmpty else { return noteManual(.manual, .noAlbumsSelected) }
         await albums.refresh()
         guard albums.canRead else { return noteManual(.manual, .noLibraryAccess) }
-        let sources = await albums.sources(for: preferences.selectedAlbumIDs)
+        let email = account.status.email
+        let selected = preferences.selectedAlbumIDs
+        let scan = await libraryChanges.scanAll(albums: albums, selectedAlbumIDs: selected, accountIdentifier: email)
+        guard !Task.isCancelled, account.status.email == email, preferences.selectedAlbumIDs == selected else {
+            return noteManual(.manual, .nothingToDo)
+        }
         // Released before the count is taken, not inside the run, so a retried
         // failure is part of the number the user is shown. A failed row already
         // tracks its source, so `enqueue` cannot count it a second time.
         let released = queue.retryRetryableFailures()
-        let accepted = queue.enqueue(sources, skippingExisting: true)
-        let total = accepted.count + released
+        let accepted = enqueueScan(scan)
+        let total = accepted.accepted.count + released
         guard total > 0 else { return noteManual(.manual, .nothingToDo) }
-        startForegroundRun(sources, source: .manual)
+        startForegroundRun(scan.sources, source: .manual)
         return .started(count: total)
     }
 
@@ -595,17 +613,22 @@ final class AutomaticBackupCoordinator: ObservableObject {
         guard !preferences.selectedAlbumIDs.isEmpty else { return noteManual(.recheck, .noAlbumsSelected) }
         await albums.refresh()
         guard albums.canRead else { return noteManual(.recheck, .noLibraryAccess) }
-        let sources = await albums.sources(for: preferences.selectedAlbumIDs)
-        guard !sources.isEmpty else { return noteManual(.recheck, .nothingToDo) }
+        let email = account.status.email
+        let selected = preferences.selectedAlbumIDs
+        let scan = await libraryChanges.scanAll(albums: albums, selectedAlbumIDs: selected, accountIdentifier: email)
+        guard !Task.isCancelled, account.status.email == email, preferences.selectedAlbumIDs == selected,
+              !scan.sources.isEmpty else { return noteManual(.recheck, .nothingToDo) }
         // A failed row is not in the completion ledger, so `reverify` cannot see
         // it — and as a tracked row it blocks its own source from being enqueued
         // again. Releasing first is what makes this the "check everything is
         // actually backed up" action the button claims to be.
         let released = queue.retryRetryableFailures()
-        let result = queue.reverify(sources)
+        queue.invalidateChangedSources(scan.editedSources)
+        let result = queue.reverify(scan.sources)
+        if queue.persistenceWarning == nil { libraryChanges.commit(scan) }
         let total = result.enqueued + released
         guard total > 0 else { return noteManual(.recheck, .nothingToDo) }
-        startForegroundRun(sources, source: .recheck)
+        startForegroundRun(scan.sources, source: .recheck)
         return .rechecking(count: total)
     }
 
@@ -770,19 +793,7 @@ final class AutomaticBackupCoordinator: ObservableObject {
         let scan = libraryChanges.scan(albums: albums,
                                        selectedAlbumIDs: preferences.selectedAlbumIDs,
                                        accountIdentifier: account.status.email)
-        // An edited asset already has a completion recorded against its
-        // identifier, so the dedup below would drop it. Release those first;
-        // the worker's hash lookup still short-circuits anything whose bytes
-        // did not actually change.
-        if !scan.editedSources.isEmpty {
-            queue.forgetCompletedSources(for: scan.editedSources)
-        }
-        let outcome = queue.enqueueReportingLimit(scan.sources, skippingExisting: true,
-                                                  limit: Self.backgroundBatchLimit)
-        // Advance the change token once every source in this scan has been
-        // durably handed to the queue — accepted now, or already tracked. Only
-        // a batch the limit cut short leaves sources unexamined.
-        if !outcome.reachedLimit, queue.persistenceWarning == nil { libraryChanges.commit(scan) }
+        let outcome = enqueueScan(scan, limit: Self.backgroundBatchLimit)
 
         let backedUpBefore = queue.completedSourceCount
         let settled: Bool

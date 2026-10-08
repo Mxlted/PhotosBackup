@@ -1,6 +1,10 @@
 import XCTest
 @testable import PhotosBackup
 
+#if !compiler(>=6.2)
+#error("Tests and releases require Xcode 26+ so continued background backup is compiled.")
+#endif
+
 final class ContinuedBackupTests: XCTestCase {
 
     func testTheTaskContinuesOnlyWhileTheQueueCanMoveOnItsOwn() {

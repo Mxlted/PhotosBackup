@@ -73,9 +73,9 @@ Photos credential, and an authenticated `photosdata-pa` request succeeds.
 The Xcode project, app target, and scheme are named `PhotosBackup`; the
 user-facing app is named **Photos Backup**.
 
-Latest release: **0.3.7** ([releases](https://github.com/g8row/PhotosBackup/releases)).
-Every push and pull request runs the suite on an iPhone simulator: 191 tests,
-189 pass, 0 fail. The 2 opt-in live tests are skipped.
+Latest release: **0.3.8** ([releases](https://github.com/Mxlted/PhotosBackup/releases)).
+Every push and pull request runs the offline suite on an iPhone simulator.
+The 2 opt-in live tests are skipped unless explicitly enabled.
 
 Each release's `.ipa` is built by GitHub Actions from the tagged commit and
 attached with its SHA-256, so the binary can be checked against the source it
@@ -111,7 +111,7 @@ or so after the crash.
 
 ## Requirements
 
-- macOS with Xcode 16.4 and an installed iOS Simulator runtime
+- macOS with Xcode 26 or newer and an installed iOS Simulator runtime
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.40 or newer
 - iOS 15.0 or newer
 - A Google account for the live connection flow
@@ -173,8 +173,9 @@ sideloading:
 ./Scripts/make-ipa.sh
 ```
 
-The script defaults to `DEVELOPER_DIR=/Applications/Xcode-16.4.0.app/Contents/Developer`.
-Override it only if Xcode lives elsewhere:
+The script uses the Xcode selected by `xcode-select` and requires Xcode 26 or
+newer so continued background backup is included. CI pins Xcode 26.3 for both
+tests and releases. Override the local selection when needed:
 
 ```sh
 DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer ./Scripts/make-ipa.sh
@@ -186,10 +187,14 @@ tool re-signs it with the Apple ID configured on the device.
 ## Install via SideStore
 
 Prebuilt unsigned IPAs are attached to each
-[GitHub release](https://github.com/g8row/PhotosBackup/releases).
+[GitHub release](https://github.com/Mxlted/PhotosBackup/releases).
+
+This fork's releases can be installed manually with the steps below. The
+automatic source and one-tap install links in this section track the
+[upstream project](https://github.com/g8row/PhotosBackup), not this fork.
 
 To get new versions automatically, add this source in SideStore, AltStore, or
-Feather. It is regenerated from every release:
+Feather. It is regenerated after the release IPA has finished uploading:
 
 ```text
 https://g8row.github.io/PhotosBackup/apps.json
@@ -282,6 +287,11 @@ Android master token → Photos access token → private Photos API
   expired-token recovery use a correctness-first current-library scan. The token
   advances once a scan's sources have all been handed to the queue, so a
   saturated queue stops re-enumerating the library on every window.
+  Foreground and fallback scans compare saved asset revisions so edits are
+  detected even without change history. Editing or rechecking a photo also
+  invalidates its motion and edit-base records. The first scan after upgrading
+  from a version without revision tracking rechecks the selection against
+  Google; existing matching bytes are not uploaded again.
 - Export, hashing, duplicate lookup, and upload initialization still need an
   execution window. Once initialized, the file PUT continues under iOS even if
   the processing window expires; the app persists the receipt before commit.

@@ -2,21 +2,26 @@
 # Build an UNSIGNED .ipa for sideloading with SideStore / AltStore.
 #
 # The output is deliberately unsigned: SideStore re-signs it on device with the
-# user's own Apple ID and applies whatever entitlements that account can
-# provision. A free personal team cannot provision App Groups, so the extension
-# -> app handoff falls back to the photosbackup:// URL channel; see
-# docs/ADR-001-auth-route.md.
+# user's own Apple ID. Authentication takes place in the app's web view;
+# no Safari extension or App Group is required.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-: "${DEVELOPER_DIR:=/Applications/Xcode-16.4.0.app/Contents/Developer}"
+: "${DEVELOPER_DIR:=$(xcode-select -p)}"
 export DEVELOPER_DIR
 
 CONFIG="${1:-Release}"
 BUILD_DIR="$(mktemp -d)"
+trap 'rm -rf "$BUILD_DIR"' EXIT
 OUT="$PWD/build/PhotosBackup.ipa"
 
 command -v xcodegen >/dev/null || { echo "xcodegen not found" >&2; exit 1; }
+# Fail instead of silently compiling out continued background backup.
+XCODE_MAJOR=$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')
+if [ "${XCODE_MAJOR:-0}" -lt 26 ]; then
+  echo "Xcode 26 or newer is required for continued background backup. Set DEVELOPER_DIR to a compatible Xcode installation." >&2
+  exit 1
+fi
 xcodegen generate
 
 xcodebuild -project PhotosBackup.xcodeproj -scheme PhotosBackup \
@@ -32,7 +37,6 @@ mkdir -p "$STAGE/Payload" "$PWD/build"
 cp -R "$APP" "$STAGE/Payload/"
 rm -f "$OUT"
 ( cd "$STAGE" && zip -qry "$OUT" Payload )
-rm -rf "$BUILD_DIR"
 
 echo "Unsigned IPA: $OUT ($(du -h "$OUT" | cut -f1))"
 echo "Install by opening it in SideStore; it signs with your Apple ID on device."

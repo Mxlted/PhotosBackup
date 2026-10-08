@@ -195,7 +195,7 @@ final class UploadQueue: ObservableObject {
     /// end, so the ceiling costs real disk and CPU, and because the background
     /// session's per-host connection limit is fixed when that session is
     /// created — going wider than that limit would not widen the transfers.
-    static let concurrencyRange = 1...10
+    nonisolated static let concurrencyRange = 1...10
 
     private(set) var maxConcurrent: Int
     let maxAttempts: Int
@@ -652,7 +652,9 @@ final class UploadQueue: ObservableObject {
     /// Returns the number of sources forgotten.
     @discardableResult
     func forgetCompletedSources(for sources: [MediaSource]) -> Int {
-        let keys = Set(sources.compactMap(\.queueDeduplicationKey)).intersection(completedSourceKeys)
+        let directKeys = Set(sources.compactMap(\.queueDeduplicationKey))
+        let forgotten = directKeys.intersection(completedSourceKeys).count
+        let keys = Self.relatedKeys(for: sources).intersection(completedSourceKeys)
         guard !keys.isEmpty else { return 0 }
         completedSourceKeys.subtract(keys)
         items.removeAll { item in
@@ -675,7 +677,46 @@ final class UploadQueue: ObservableObject {
             "queue",
             "Forgot \(keys.count) remembered backup\(keys.count == 1 ? "" : "s") so they are checked against Google again"
         )
-        return keys.count
+        return forgotten
+    }
+
+    /// A still, its attached motion, and its pre-edit base all describe the
+    /// same asset revision. Rechecking only the still leaves stale companion
+    /// completions suppressing their follow-up uploads.
+    private static func relatedKeys(for sources: [MediaSource]) -> Set<String> {
+        var keys = Set(sources.compactMap(\.queueDeduplicationKey))
+        for source in sources {
+            guard case .asset(let id) = source else { continue }
+            keys.insert(motionKeyPrefix + id)
+            keys.insert(editBaseKeyPrefix + id)
+        }
+        return keys
+    }
+
+    /// An edit can arrive while the old revision is staged or transferring.
+    /// Retire those rows as well as completions. New UUIDs ensure late events
+    /// from cancelled workers cannot finish or overwrite the replacement row.
+    /// Deliberate user cancellations remain skip markers.
+    func invalidateChangedSources(_ sources: [MediaSource]) {
+        guard !sources.isEmpty else { return }
+        forgetCompletedSources(for: sources)
+        let keys = Self.relatedKeys(for: sources)
+        var removed: Set<UUID> = []
+        for index in items.indices {
+            let item = items[index]
+            guard item.state != .cancelled, !userCancelled.contains(item.id),
+                  let key = item.source.queueDeduplicationKey, keys.contains(key) else { continue }
+            running[item.id]?.cancel()
+            requeueCancelled.remove(item.id)
+            cleanCheckpoint(for: index)
+            clearPreparationMarker(item.id)
+            if !item.state.isFinished { settledRowCount += 1 }
+            removed.insert(item.id)
+        }
+        guard !removed.isEmpty else { return }
+        items.removeAll { removed.contains($0.id) }
+        rebuildDerivedState()
+        persistNow()
     }
 
     /// Forget + re-enqueue in one step for Settings. The worker's hash lookup
@@ -684,7 +725,13 @@ final class UploadQueue: ObservableObject {
     /// Returns `(forgotten, enqueued)`.
     @discardableResult
     func reverify(_ sources: [MediaSource], limit: Int? = nil) -> (forgotten: Int, enqueued: Int) {
+        // A previously completed still can have an old motion transfer still
+        // running. Retire that work before scheduling a fresh still/recheck.
+        let completed = sources.filter {
+            !Self.relatedKeys(for: [$0]).isDisjoint(with: completedSourceKeys)
+        }
         let forgotten = forgetCompletedSources(for: sources)
+        invalidateChangedSources(completed)
         let enqueued = enqueue(sources, skippingExisting: true, limit: limit).count
         return (forgotten, enqueued)
     }

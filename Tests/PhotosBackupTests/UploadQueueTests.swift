@@ -1190,6 +1190,101 @@ final class UploadQueueTests: XCTestCase {
         await settle(queue) { queue.items.first?.state == .done }
     }
 
+    func testReverifyIncludesMotionAndEditBaseAfterRelaunch() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FileUploadQueuePersistence(url: directory.appendingPathComponent("queue.json"))
+        let source = MediaSource.asset(localIdentifier: "photo")
+        let companions: [MediaSource] = [.livePhotoMotion(localIdentifier: "photo"), .editBase(localIdentifier: "photo")]
+        let first = UploadQueue(worker: WorkerScript([]).worker(), persistence: persistence)
+        first.activateAccount("person@example.com")
+        first.followUpSources = { $0 == source ? companions : [] }
+        first.enqueue([source])
+        await settle(first) { first.completedSourceKeys.count == 3 }
+
+        let script = WorkerScript([])
+        let restored = UploadQueue(worker: script.worker(), persistence: persistence)
+        restored.activateAccount("person@example.com")
+        restored.followUpSources = { $0 == source ? companions : [] }
+        XCTAssertEqual(restored.reverify([source]).forgotten, 1, "count photos, not components")
+        XCTAssertTrue(try persistence.loadCompletedSourceKeys(for: "person@example.com").isEmpty)
+        await settle(restored) { restored.completedSourceKeys.count == 3 }
+        XCTAssertEqual(script.calls, 3, "the still and both components must be checked")
+    }
+
+    func testAnEditDiscardsTheOldCheckpointAndIgnoresLateWorkerEvents() async {
+        let source = MediaSource.asset(localIdentifier: "photo")
+        let checkpoint = UploadCheckpoint(filePath: "/tmp/old-photo.jpg", filename: "old-photo.jpg",
+                                          modified: Date(), byteCount: 1, temporary: true)
+        let oldFinished = expectation(description: "old worker finished after cancellation")
+        let cleaned = expectation(description: "old staged copy cleaned")
+        let worker: UploadWorker = { _, _, _, _, emit in
+            await emit(.checkpoint(checkpoint))
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch {}
+            // A callback already in flight can still succeed after cancellation.
+            await emit(.state(.done))
+            oldFinished.fulfill()
+            return .uploaded(mediaKey: "OLD")
+        }
+        let queue = UploadQueue(worker: worker, maxConcurrent: 1,
+                                checkpointCleaner: { _, saved in
+                                    XCTAssertEqual(saved, checkpoint)
+                                    cleaned.fulfill()
+                                })
+        let originalID = queue.enqueue([source]).first!
+        await settle(queue) { queue.items.first?.checkpoint != nil }
+        queue.setNetworkAccess(allowed: false)
+        queue.invalidateChangedSources([source])
+        let replacementID = queue.enqueue([source], skippingExisting: true).first!
+        XCTAssertNotEqual(originalID, replacementID)
+        await fulfillment(of: [oldFinished, cleaned], timeout: 5)
+        await Task.yield()
+        XCTAssertEqual(queue.items.count, 1)
+        XCTAssertEqual(queue.items.first?.state, .queued)
+        XCTAssertNil(queue.items.first?.checkpoint)
+        XCTAssertTrue(queue.completedSourceKeys.isEmpty)
+    }
+
+    func testRevisionInvalidationPreservesUserCancellation() {
+        let queue = makeQueue(WorkerScript([]))
+        queue.setNetworkAccess(allowed: false)
+        let source = MediaSource.asset(localIdentifier: "photo")
+        let id = queue.enqueue([source]).first!
+        queue.cancel(id)
+        queue.invalidateChangedSources([source])
+        XCTAssertTrue(queue.enqueue([source], skippingExisting: true).isEmpty)
+        XCTAssertEqual(queue.items.first?.state, .cancelled)
+    }
+
+    func testRecheckingAStillRetiresItsOldInFlightMotion() async {
+        let script = WorkerScript([.succeed(.uploaded(mediaKey: "OLD")), .block])
+        let queue = makeQueue(script, maxConcurrent: 1)
+        let source = MediaSource.asset(localIdentifier: "photo")
+        let motion = MediaSource.livePhotoMotion(localIdentifier: "photo")
+        queue.followUpSources = { $0 == source ? [motion] : [] }
+        queue.enqueue([source])
+        await settle(queue) { script.calls == 2 && queue.items.last?.state.isWorking == true }
+        let oldMotionID = queue.items.last!.id
+        XCTAssertEqual(queue.reverify([source]).enqueued, 1)
+        await settle(queue) { queue.completedSourceKeys.count == 2 && queue.isIdle }
+        XCTAssertFalse(queue.items.contains { $0.id == oldMotionID })
+        XCTAssertEqual(script.calls, 4, "both the new still and motion must run")
+    }
+
+    func testInvalidatingAnEditRemovesFinishedCompanionRowsToo() async {
+        let queue = makeQueue(WorkerScript([]))
+        let source = MediaSource.asset(localIdentifier: "photo")
+        let companions: [MediaSource] = [.livePhotoMotion(localIdentifier: "photo"), .editBase(localIdentifier: "photo")]
+        queue.followUpSources = { $0 == source ? companions : [] }
+        queue.enqueue([source])
+        await settle(queue) { queue.completedSourceKeys.count == 3 }
+        queue.setNetworkAccess(allowed: false)
+        queue.invalidateChangedSources([source])
+        XCTAssertTrue(queue.completedSourceKeys.isEmpty)
+        XCTAssertTrue(queue.items.isEmpty)
+        XCTAssertEqual(queue.enqueue([source], skippingExisting: true).count, 1)
+    }
+
     /// Raising the limit has to start the extra work immediately rather than
     /// waiting for something else to nudge the queue.
     func testRaisingConcurrencyStartsMoreWorkAtOnce() async {

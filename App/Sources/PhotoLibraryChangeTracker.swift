@@ -1,15 +1,16 @@
 import Foundation
 import Photos
 
-/// Persists PhotoKit's change token so automatic backup sees imports by library
-/// insertion, including files whose embedded creation date is years old.
+/// Tracks both PhotoKit history and scanned revisions. History finds backdated
+/// imports cheaply; revisions detect edits during full scans, including iOS 15
+/// and recovery from expired history. Neither is a claim of upload completion.
 @MainActor
 final class PhotoLibraryChangeTracker {
     struct Scan {
         let sources: [MediaSource]
-        /// Assets PhotoKit reported as *changed* rather than new. Their bytes
-        /// may differ from what was uploaded, so the queue has to forget the
-        /// completion before re-enqueueing or its dedup would drop them.
+        /// Assets whose scanned revision changed or is not yet known. Their
+        /// bytes may differ from the recorded backup, so invalidate old queue
+        /// state before deduplication.
         let editedSources: [MediaSource]
         fileprivate let nextState: StoredState?
 
@@ -22,7 +23,14 @@ final class PhotoLibraryChangeTracker {
 
     fileprivate struct StoredState: Codable {
         let context: String
-        let token: Data
+        let token: Data?
+        // Optional to read snapshots from versions that only stored a token.
+        let revisions: [String: AssetRevision]?
+    }
+
+    struct AssetRevision: Codable, Equatable, Sendable {
+        let modified: Date?
+        let hasAdjustments: Bool
     }
 
     private let url: URL
@@ -38,22 +46,22 @@ final class PhotoLibraryChangeTracker {
     }
 
     func scan(albums: PhotoAlbumStore, selectedAlbumIDs: Set<String>, accountIdentifier: String?) -> Scan {
-        let context = ([accountIdentifier?.lowercased() ?? ""] + selectedAlbumIDs.sorted())
-            .joined(separator: "\u{1F}")
+        let context = Self.context(selectedAlbumIDs, accountIdentifier)
         guard #available(iOS 16, *) else {
             let sources = albums.sourcesSynchronously(for: selectedAlbumIDs)
             DiagnosticEventLog.shared.record(
                 "library",
                 "Scanned the selected albums in full (iOS 15 keeps no change history): \(sources.count) items"
             )
-            return Scan(sources: sources)
+            return makeScan(sources: sources, revisions: Self.readRevisions(sources), context: context)
         }
 
         let library = PHPhotoLibrary.shared()
         let current = library.currentChangeToken
-        let next = archive(current).map { StoredState(context: context, token: $0) }
+        let nextToken = archive(current)
         guard let stored = load(), stored.context == context,
-              let token = unarchive(stored.token) else {
+              stored.revisions != nil,
+              let data = stored.token, let token = unarchive(data) else {
             let sources = albums.sourcesSynchronously(for: selectedAlbumIDs)
             let why = load() == nil
                 ? "no earlier scan to compare with"
@@ -62,18 +70,21 @@ final class PhotoLibraryChangeTracker {
                 "library",
                 "Scanned the selected albums in full (\(why)): \(sources.count) items"
             )
-            return Scan(sources: sources, nextState: next)
+            return makeScan(sources: sources, revisions: Self.readRevisions(sources),
+                            context: context, nextToken: nextToken)
         }
 
         do {
             let changes = try library.fetchPersistentChanges(since: token)
             var inserted = Set<String>()
             var updated = Set<String>()
+            var deleted = Set<String>()
             var selectedCollectionChanged = false
             for change in changes {
                 let assetDetails = try change.changeDetails(for: .asset)
                 inserted.formUnion(assetDetails.insertedLocalIdentifiers)
                 updated.formUnion(assetDetails.updatedLocalIdentifiers)
+                deleted.formUnion(assetDetails.deletedLocalIdentifiers)
                 if !selectedAlbumIDs.contains(PhotoAlbum.allPhotosID) {
                     let collectionDetails = try change.changeDetails(for: .assetCollection)
                     let changedCollections = collectionDetails.insertedLocalIdentifiers
@@ -86,7 +97,6 @@ final class PhotoLibraryChangeTracker {
             // An asset can appear in both sets across a batch of changes; a new
             // asset is not an edit, so insertion wins.
             updated.subtract(inserted)
-            let edited = albums.sources(for: selectedAlbumIDs, matching: updated)
             let sources = selectedCollectionChanged
                 ? albums.sourcesSynchronously(for: selectedAlbumIDs)
                 : albums.sources(for: selectedAlbumIDs, matching: inserted.union(updated))
@@ -96,7 +106,9 @@ final class PhotoLibraryChangeTracker {
                     ? "A selected album changed, so the selection was rescanned in full: \(sources.count) items"
                     : "Read the library's change history: \(inserted.count) added, \(updated.count) edited; \(sources.count) in the selected albums"
             )
-            return Scan(sources: sources, editedSources: edited, nextState: next)
+            return makeScan(sources: sources, revisions: Self.readRevisions(sources),
+                            context: context, nextToken: nextToken,
+                            fullScan: selectedCollectionChanged, deleted: deleted)
         } catch {
             // Expired/unavailable history requires one correctness-first current
             // scan, after which the fresh token becomes the new baseline.
@@ -106,17 +118,71 @@ final class PhotoLibraryChangeTracker {
                 "The library's change history was unavailable (\(error.localizedDescription)), so the selection was scanned in full: \(sources.count) items",
                 level: .warning
             )
-            return Scan(sources: sources, nextState: next)
+            return makeScan(sources: sources, revisions: Self.readRevisions(sources),
+                            context: context, nextToken: nextToken)
         }
     }
 
-    /// Advance only after every source was handed to the durable queue.
-    func commit(_ scan: Scan) {
+    /// Foreground and manual runs retain a full selection for their progress
+    /// counts. Capture the token BEFORE reading assets so edits arriving during
+    /// the scan remain visible in the next history batch.
+    func scanAll(albums: PhotoAlbumStore, selectedAlbumIDs: Set<String>, accountIdentifier: String?) async -> Scan {
+        let context = Self.context(selectedAlbumIDs, accountIdentifier)
+        let token: Data?
+        if #available(iOS 16, *) { token = archive(PHPhotoLibrary.shared().currentChangeToken) }
+        else { token = nil }
+        let sources = await albums.sources(for: selectedAlbumIDs)
+        let revisions = await Task.detached(priority: .utility) { Self.readRevisions(sources) }.value
+        return makeScan(sources: sources, revisions: revisions, context: context, nextToken: token)
+    }
+
+    private static func context(_ albumIDs: Set<String>, _ account: String?) -> String {
+        ([account?.lowercased() ?? ""] + albumIDs.sorted()).joined(separator: "\u{1F}")
+    }
+
+    private nonisolated static func readRevisions(_ sources: [MediaSource]) -> [String: AssetRevision] {
+        let identifiers = sources.compactMap { source -> String? in
+            if case .asset(let id) = source { return id }
+            return nil
+        }
+        var revisions: [String: AssetRevision] = [:]
+        PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil).enumerateObjects { asset, _, _ in
+            revisions[asset.localIdentifier] = AssetRevision(modified: asset.modificationDate,
+                                                             hasAdjustments: asset.hasAdjustments)
+        }
+        return revisions
+    }
+
+    /// The same revision comparison is used by history batches and full scans.
+    /// Missing old revisions (including an upgrade) trigger a hash recheck once.
+    /// The worker still skips bytes already held by Google.
+    func makeScan(sources: [MediaSource], revisions: [String: AssetRevision], context: String,
+                  nextToken: Data? = nil, fullScan: Bool = true, deleted: Set<String> = []) -> Scan {
+        let stored = load()
+        let previous = stored?.context == context ? stored?.revisions ?? [:] : [:]
+        let edited = sources.filter { source in
+            guard case .asset(let id) = source else { return false }
+            guard let revision = revisions[id], revision.modified != nil else { return true }
+            return previous[id] != revision
+        }
+        var next = fullScan ? revisions : previous.merging(revisions) { _, new in new }
+        for id in deleted { next[id] = nil }
+        return Scan(sources: sources, editedSources: edited,
+                    nextState: StoredState(context: context, token: nextToken, revisions: next))
+    }
+
+    /// Revisions may advance after stale completions have been durably removed.
+    /// Only advance history when all sources have durable queue handles. Keeping
+    /// the earlier token on a bounded batch finds the rest on the next window.
+    func commit(_ scan: Scan, advanceToken: Bool = true) {
         guard let state = scan.nextState else { return }
         do {
+            let previous = load()
+            let token = advanceToken ? state.token : (previous?.context == state.context ? previous?.token : nil)
+            let committed = StoredState(context: state.context, token: token, revisions: state.revisions)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
-            try JSONEncoder().encode(state).write(to: url, options: .atomic)
+            try JSONEncoder().encode(committed).write(to: url, options: .atomic)
             try? FileManager.default.setAttributes(
                 [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
                 ofItemAtPath: url.path

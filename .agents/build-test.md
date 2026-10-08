@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- macOS + Xcode 16.4 + iOS Simulator runtime, XcodeGen 2.40+ (`brew install xcodegen`), iOS 16.0+
+- macOS + Xcode 26+ + iOS Simulator runtime (CI pins Xcode 26.3), XcodeGen 2.40+ (`brew install xcodegen`), iOS 15.0+
 
 ## Generate (always first — .xcodeproj is generated)
 
@@ -12,6 +12,11 @@ open PhotosBackup.xcodeproj
 ```
 
 Signed device build: set `DEVELOPMENT_TEAM` in `project.yml`, regenerate, let Xcode manage signing.
+
+XcodeBuildMCP is preferred when available: discover its simulator build/test
+commands with `xcodebuildmcp simulator --help`. The raw commands below are also
+useful for CI and manual runs. Simulator tests use local signing for Keychain
+coverage; do not disable signing for that test run.
 
 ## Build (simulator, unsigned)
 
@@ -24,7 +29,7 @@ xcodebuild \
   build
 ```
 
-## Test (offline — default gate, ~75 tests)
+## Test (offline — default gate)
 
 ```sh
 xcrun simctl list devices available   # pick a name first
@@ -32,7 +37,6 @@ xcodebuild \
   -project PhotosBackup.xcodeproj \
   -scheme PhotosBackup \
   -destination 'platform=iOS Simulator,name=<your simulator>' \
-  CODE_SIGNING_ALLOWED=NO \
   test
 ```
 
@@ -50,6 +54,9 @@ xcodebuild ... test \
 ```
 
 `TEST_RUNNER_GPMC_OAUTH_TOKEN` must be a fresh single-use token. Never commit tokens.
+
+CI tests and releases use the same Xcode 26.3 pin. The release workflow calls
+the installation-feed workflow only after uploading the IPA.
 
 ## IPA (SideStore sideload)
 

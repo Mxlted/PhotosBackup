@@ -35,8 +35,6 @@ final class UploadPhaseRelay: @unchecked Sendable {
         Task { await self.drain() }
     }
 
-    /// Flush whatever is pending, ignoring the rate limit. Used for the phase
-    /// changes that matter for the row's meaning rather than its percentage.
     /// Drop anything still pending and refuse further reports. Called once the
     /// worker has a terminal outcome, so a late progress tick cannot land on a
     /// row that has already moved on.
@@ -48,37 +46,38 @@ final class UploadPhaseRelay: @unchecked Sendable {
     }
 
     func flush() async {
-        let state: UploadItem.State?
+        if let state = takePending() { await emit(.state(state)) }
+    }
+
+    // Keep lock ownership inside synchronous helpers; no suspension can occur
+    // while the lock is held, including when compiled in Swift 6 mode.
+    private func takePending() -> UploadItem.State? {
         lock.lock()
-        state = pending
+        defer { lock.unlock() }
+        let state = pending
         pending = nil
         lastSentAt = Date()
-        lock.unlock()
-        if let state { await emit(.state(state)) }
+        return state
+    }
+
+    private func nextDelivery() -> (state: UploadItem.State?, wait: TimeInterval)? {
+        lock.lock()
+        defer { lock.unlock() }
+        let elapsed = Date().timeIntervalSince(lastSentAt)
+        if elapsed >= interval, let next = pending {
+            pending = nil
+            lastSentAt = Date()
+            return (next, 0)
+        }
+        if pending != nil { return (nil, max(0, interval - elapsed)) }
+        draining = false
+        return nil
     }
 
     private func drain() async {
-        while true {
-            let wait: TimeInterval
-            let state: UploadItem.State?
-            lock.lock()
-            let elapsed = Date().timeIntervalSince(lastSentAt)
-            if elapsed >= interval, let next = pending {
-                state = next
-                pending = nil
-                lastSentAt = Date()
-                wait = 0
-            } else if pending != nil {
-                state = nil
-                wait = max(0, interval - elapsed)
-            } else {
-                draining = false
-                lock.unlock()
-                return
-            }
-            lock.unlock()
-            if let state { await emit(.state(state)) }
-            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+        while let delivery = nextDelivery() {
+            if let state = delivery.state { await emit(.state(state)) }
+            if delivery.wait > 0 { try? await Task.sleep(nanoseconds: UInt64(delivery.wait * 1_000_000_000)) }
         }
     }
 }

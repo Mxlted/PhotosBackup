@@ -2,8 +2,10 @@ name: update-source
 
 on:
   release:
-    types: [published, edited]
+    types: [edited]
   workflow_dispatch:
+  # Publication calls this only after release.yml has uploaded the IPA.
+  workflow_call:
 
 permissions:
   contents: write
@@ -43,7 +45,7 @@ jobs:
 
       - name: Fetch latest release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ steps.src.outputs.repo }}
         run: |
           # The default token is scoped to this repository. When the workflow

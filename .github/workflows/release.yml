@@ -34,7 +34,7 @@ jobs:
           echo "DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
           DEVELOPER_DIR="$XCODE_APP/Contents/Developer" xcodebuild -version
         env:
-          XCODE_APP: /Applications/Xcode_16.4.app
+          XCODE_APP: /Applications/Xcode_26.3.app
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -65,3 +65,9 @@ jobs:
             build/PhotosBackup.ipa
             build/PhotosBackup.ipa.sha256
           if-no-files-found: error
+
+  update-source:
+    name: Update installation feed after the IPA is available
+    needs: build
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    uses: ./.github/workflows/source.yml

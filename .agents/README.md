@@ -6,8 +6,9 @@ Start here. Read this file + `architecture.md` + `build-test.md` before touching
 
 Experimental on-device iPhone app (**Photos Backup**, Xcode target `PhotosBackup`)
 that backs up Photos library items to Google Photos via private `photos.native`
-endpoints + Android-style auth. SwiftUI app + bundled Safari web extension.
-No backend. Swift 5.9, iOS 16.0+, XcodeGen-generated Xcode project.
+endpoints + Android-style auth. Single SwiftUI app with an in-app sign-in web view.
+No backend or Safari extension. Swift 5 language mode, Xcode 26+, iOS 15.0+,
+XcodeGen-generated Xcode project.
 
 ## Map
 
@@ -23,9 +24,10 @@ No backend. Swift 5.9, iOS 16.0+, XcodeGen-generated Xcode project.
 
 ## App identity (don't change casually)
 
-- App bundle ID: `com.g8row.photosbackup`, Extension: `... .extension`
-- App Group: `group.com.g8row.photosbackup`
-- URL scheme: `photosbackup://`, BG task: `com.g8row.photosbackup.background-backup`
+- App bundle ID: `com.g8row.photosbackup`
+- BG task: `com.g8row.photosbackup.background-backup`
+- Continued backup: `<bundle ID>.continued-backup.*`
+- Background upload session: `com.g8row.photosbackup.background-upload`
 
 ## First actions for a new task
 
