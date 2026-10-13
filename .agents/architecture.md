@@ -29,8 +29,9 @@ Generated `PhotosBackup.xcodeproj` is disposable — regenerate, don't hand-edit
 | `TokenExchange` | TokenExchange.swift | oauth_token → master token → Photos credential. Rejects `TokenEncrypted=1` (token binding not implemented) |
 | `GPMCClient` | GPMC/Core/GPMCClient.swift | `photosdata-pa` RPCs, protobuf, access-token refresh (1 forced re-auth on 401/403), `GPMCError` with `isRetryable` |
 | `UploadQueue` (`@MainActor`) | UploadQueue.swift | Bounded concurrency (default 2), 3 attempts w/ backoff, halt-on-credential-rejected, states: queued → exporting → hashing → checkingDuplicate → uploading → finalizing → done/alreadyBackedUp |
-| `UploadQueuePersistence` | UploadQueuePersistence.swift | Durable per-account snapshot (version-checked, never reused across accounts) |
+| `UploadQueuePersistence` | UploadQueuePersistence.swift | Durable account-scoped snapshot plus completion ledger; per-account recovery overrides preserve failed ledger invalidations across relaunches and account switches |
 | `AutomaticBackupCoordinator` | AutomaticBackupCoordinator.swift | BGProcessingTask scheduling; batches: 250/background scan, whole selection in the foreground. On iOS 26 also holds a `BGContinuedProcessingTask` (`ContinuedBackup.swift`) whenever the open app has work, so the queue keeps running after the app is backgrounded (max 2 concurrent there); the other background paths skip their suspend while it is active |
+| `BackupExecutionController` | BackupExecutionController.swift | Tracks foreground, continued, processing/Shortcut and transfer-delivery ownership; a window only suspends the queue after the last applicable owner ends |
 | `PhotoLibraryChangeTracker` | PhotoLibraryChangeTracker.swift | Account/selection-scoped scan revisions plus PhotoKit history; foreground/full fallback scans detect edits, and scan state commits after durable queue invalidation/enqueue |
 | `NetworkPolicy` / monitor | NetworkPolicy.swift | Wi-Fi-only vs Wi-Fi+cellular, enforced at queue + request level |
 | `CredentialStore` | CredentialStore.swift | Single Keychain item, `AfterFirstUnlockThisDeviceOnly` |
@@ -42,3 +43,9 @@ Generated `PhotosBackup.xcodeproj` is disposable — regenerate, don't hand-edit
 In-app EmbeddedSetup WKWebView → AccountConnectView captures oauth_token
 → AccountConnector → TokenExchange → GPMCClient → UploadQueue → PhotosUploader
 ```
+
+## Recovery boundaries
+
+- Queue snapshots remain version 1. The optional `completionLedgerOverrides` map holds full completion sets only for accounts whose ledger updates failed. Its omissions override stale ledger keys until reconciliation succeeds. Snapshot mutations preserve and update these overrides atomically.
+- `BackgroundFileUploadTransport` creates its session once under a dedicated lock and reconciles task enumeration on the serial delegate queue. A receipt delivered during enumeration prevents a duplicate PUT. Its session and result-directory injection seams keep relaunch tests offline.
+- `PhotoResourceReader` shares cancellation and error propagation across export, still-image hashing, and edit metadata reads. Failed or malformed metadata reads never settle an edit-base row as backed up.

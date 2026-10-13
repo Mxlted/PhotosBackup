@@ -14,8 +14,7 @@ open PhotosBackup.xcodeproj
 Signed device build: set `DEVELOPMENT_TEAM` in `project.yml`, regenerate, let Xcode manage signing.
 
 XcodeBuildMCP is preferred when available: discover its simulator build/test
-commands with `xcodebuildmcp simulator --help`. The raw commands below are also
-useful for CI and manual runs. Simulator tests use local signing for Keychain
+commands with `xcodebuildmcp simulator --help`. The shared script below is the complete local and CI gate. Simulator tests use local signing for Keychain
 coverage; do not disable signing for that test run.
 
 ## Build (simulator, unsigned)
@@ -32,13 +31,21 @@ xcodebuild \
 ## Test (offline — default gate)
 
 ```sh
-xcrun simctl list devices available   # pick a name first
-xcodebuild \
-  -project PhotosBackup.xcodeproj \
-  -scheme PhotosBackup \
-  -destination 'platform=iOS Simulator,name=<your simulator>' \
-  test
+swift test                         # fast protocol-core suite on macOS
+./Scripts/test.sh                   # full signed offline simulator suite
+./Scripts/test.sh <simulator-uuid>  # select a particular installed runtime
 ```
+
+The script regenerates the Xcode project, explicitly excludes live tests, and
+keeps logs/result bundles under `build/test-results/run.*`. New Swift test files
+are included by XcodeGen. Discover installed simulator UUIDs with
+`xcodebuildmcp simulator list --enabled true` or `xcrun simctl list devices available`.
+Use explicit project, scheme, and simulator arguments for focused MCP runs.
+
+Recovery tests use temporary persistence stores, injected sessions, and explicit
+completion signals; they do not exercise a real Google account or Photos library.
+An iOS 26+ run does not validate the iOS 15–25 compatibility paths. Run an older
+supported runtime when installed, and report that gap otherwise.
 
 ## Live tests (opt-in, contacts Google — never run by default)
 

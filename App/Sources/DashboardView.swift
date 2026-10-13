@@ -1,5 +1,33 @@
 import SwiftUI
 
+/// Queue history cannot prove that the current album selection was scanned.
+struct DashboardBackupStatus {
+    let title: String
+    let detail: String
+
+    init(accountUsable: Bool, pauseReason: String?, remaining: Int, failed: Int,
+         completed: Int, hasSelectedAlbums: Bool) {
+        if !accountUsable {
+            title = "Connect to back up"
+            detail = "Connect an account to get started"
+        } else if let pauseReason {
+            title = "Backup paused"
+            detail = pauseReason
+        } else if remaining > 0 {
+            title = "Backing up…"
+            detail = "\(remaining) items remaining"
+        } else if failed > 0 {
+            title = "Backup needs attention"
+            detail = "\(failed) items failed — open Activity to retry"
+        } else {
+            title = completed > 0 ? "Queue is clear" : "Ready to back up"
+            detail = hasSelectedAlbums
+                ? "No pending uploads. Use Back Up Now to check your selected albums."
+                : "Choose albums to protect"
+        }
+    }
+}
+
 struct DashboardView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject private var account: PhotosAccount
@@ -111,8 +139,8 @@ struct DashboardView: View {
         VStack(spacing: 16) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(heroTitle).font(.title2.bold())
-                    Text(heroSubtitle).font(.subheadline).foregroundStyle(.secondary)
+                    Text(backupStatus.title).font(.title2.bold())
+                    Text(backupStatus.detail).font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
                 ZStack {
@@ -339,22 +367,10 @@ struct DashboardView: View {
         .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private var heroTitle: String {
-        if !account.status.isUsable { return "Connect to back up" }
-        if queue.pauseReason != nil { return "Backup paused" }
-        if !queue.isIdle { return "Backing up…" }
-        if queue.failedCount > 0 { return "Backup needs attention" }
-        if queue.completedSourceCount == 0 { return "Ready to back up" }
-        return "Backup complete"
-    }
-
-    private var heroSubtitle: String {
-        if !account.status.isUsable { return "Connect an account to get started" }
-        if let reason = queue.pauseReason { return reason }
-        if !queue.isIdle { return "\(queue.activeCount) items remaining" }
-        if queue.failedCount > 0 { return "\(queue.failedCount) items failed — open Activity to retry" }
-        if selectedAlbums.isEmpty { return "Choose albums to protect" }
-        return "Your selected albums are up to date"
+    private var backupStatus: DashboardBackupStatus {
+        DashboardBackupStatus(accountUsable: account.status.isUsable, pauseReason: queue.pauseReason,
+                              remaining: queue.activeCount, failed: queue.failedCount,
+                              completed: queue.completedSourceCount, hasSelectedAlbums: !selectedAlbums.isEmpty)
     }
 
     private var heroProgress: Double {

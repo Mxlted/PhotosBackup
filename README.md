@@ -141,7 +141,7 @@ iOS 16+; iOS 15 may still show its home indicator.
 
 Open **Settings → Support → Create Diagnostic Report**, tap **Generate
 Report**, then **Share or Save Report**. Attach the text file to a
-[GitHub issue](https://github.com/g8row/PhotosBackup/issues). The report
+[GitHub issue](https://github.com/Mxlted/PhotosBackup/issues). The report
 opens with a short **What stands out** list that often explains the problem on
 its own. It leaves out credentials, account addresses, photo identifiers,
 filenames, media, and request URLs.
@@ -231,28 +231,17 @@ tool re-signs it with the Apple ID configured on the device.
 Prebuilt unsigned IPAs are attached to each
 [GitHub release](https://github.com/Mxlted/PhotosBackup/releases).
 
-This fork's releases can be installed manually with the steps below. The
-automatic source and one-tap install links in this section track the
-[upstream project](https://github.com/g8row/PhotosBackup), not this fork.
-
 To get new versions automatically, add this source in SideStore, AltStore, or
-Feather. It is regenerated after the release IPA has finished uploading:
+Feather. It tracks this fork and is regenerated after the release IPA has
+finished uploading:
 
 ```text
-https://g8row.github.io/PhotosBackup/apps.json
+https://raw.githubusercontent.com/Mxlted/PhotosBackup/main/docs/apps.json
 ```
 
-> [!TIP]
-> On your iPhone (with SideStore or AltStore installed), one-tap install of
-> the latest release:
->
-> - **[Install Photos Backup](https://g8row.github.io/PhotosBackup/install.html)** —
->   open on the iPhone and tap Install with SideStore / AltStore.
->
-> GitHub strips custom `sidestore://` / `altstore://` URL schemes in markdown,
-> so the buttons live on that page instead of directly in this README. It
-> installs
-> `https://github.com/g8row/PhotosBackup/releases/latest/download/PhotosBackup.ipa`.
+The [latest unsigned IPA](https://github.com/Mxlted/PhotosBackup/releases/latest/download/PhotosBackup.ipa)
+can also be installed manually. `docs/install.html` contains one-tap SideStore
+and AltStore buttons targeting this fork for deployments with GitHub Pages enabled.
 
 - AirDrop `PhotosBackup.ipa` to the iPhone and save it in Files.
 - Turn on LocalDevVPN.
