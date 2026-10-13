@@ -192,4 +192,100 @@ final class PhotosAccountTests: XCTestCase {
         XCTAssertEqual(account.status, .disconnected)
         XCTAssertNil(try? secrets.read())
     }
+
+    func testLateRejectionCannotRejectAReconnectedAccount() async {
+        let pending = PendingVerification()
+        let account = PhotosAccount(store: CredentialStore(secrets: MemorySecretStore()),
+                                    verifyClient: { _ in try await pending.run() })
+        await account.connect(result())
+        let check = Task { await account.verify() }
+        await fulfillment(of: [pending.started], timeout: 2)
+
+        // Even reconnecting the same address creates a different credential.
+        await account.connect(result())
+        let replacement = account.currentClient()
+        pending.finish(throwing: GPMCError(kind: .credentialRejected, message: "Old credential rejected"))
+
+        let outcome = await check.value
+        XCTAssertEqual(outcome, .superseded)
+        XCTAssertTrue(account.status.isUsable)
+        XCTAssertTrue(account.currentClient() === replacement)
+        XCTAssertFalse(account.verifying)
+    }
+
+    func testLateSuccessCannotVerifyANewAccount() async {
+        let pending = PendingVerification()
+        let account = PhotosAccount(store: CredentialStore(secrets: MemorySecretStore()),
+                                    verifyClient: { _ in try await pending.run() })
+        await account.connect(result())
+        let check = Task { await account.verify() }
+        await fulfillment(of: [pending.started], timeout: 2)
+
+        await account.connect(result(email: "new@example.test"))
+        let replacementStatus = account.status
+        pending.finish()
+
+        let outcome = await check.value
+        XCTAssertEqual(outcome, .superseded)
+        XCTAssertEqual(account.status, replacementStatus)
+    }
+
+    func testLateRejectionAfterDisconnectKeepsAccountDisconnected() async {
+        let pending = PendingVerification()
+        let account = PhotosAccount(store: CredentialStore(secrets: MemorySecretStore()),
+                                    verifyClient: { _ in try await pending.run() })
+        await account.connect(result())
+        let check = Task { await account.verify() }
+        await fulfillment(of: [pending.started], timeout: 2)
+
+        await account.disconnect()
+        pending.finish(throwing: GPMCError(kind: .credentialRejected, message: "Old credential rejected"))
+
+        let outcome = await check.value
+        XCTAssertEqual(outcome, .superseded)
+        XCTAssertEqual(account.status, .disconnected)
+        XCTAssertNil(account.currentClient())
+    }
+
+    func testCurrentVerificationStillReportsSuccessAndRejection() async {
+        let pending = PendingVerification()
+        let account = PhotosAccount(store: CredentialStore(secrets: MemorySecretStore()),
+                                    verifyClient: { _ in try await pending.run() })
+        await account.connect(result())
+        let check = Task { await account.verify() }
+        await fulfillment(of: [pending.started], timeout: 2)
+        pending.finish()
+        let outcome = await check.value
+        XCTAssertEqual(outcome, .succeeded)
+        XCTAssertTrue(account.status.isUsable)
+
+        let rejected = PhotosAccount(store: CredentialStore(secrets: MemorySecretStore()),
+                                     verifyClient: { _ in
+            throw GPMCError(kind: .credentialRejected, message: "Credential rejected")
+        })
+        await rejected.connect(result())
+        let rejection = await rejected.verify()
+        XCTAssertEqual(rejection, .failed("Credential rejected"))
+        XCTAssertFalse(rejected.status.isUsable)
+        XCTAssertNil(rejected.currentClient())
+    }
+}
+
+@MainActor
+private final class PendingVerification {
+    let started = XCTestExpectation(description: "Verification suspended")
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    func run() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            started.fulfill()
+        }
+    }
+
+    func finish(throwing error: Error? = nil) {
+        if let error { continuation?.resume(throwing: error) }
+        else { continuation?.resume() }
+        continuation = nil
+    }
 }

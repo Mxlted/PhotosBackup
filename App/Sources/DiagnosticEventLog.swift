@@ -24,8 +24,8 @@ struct DiagnosticEvent: Codable, Equatable, Sendable {
 
 enum DiagnosticRedactor {
     private static let replacements: [(NSRegularExpression, String)] = [
-        (#"(?i)\b(authorization|bearer|oauth_token|access_token|master_token|token|cookie)(\s*[:=]\s*)[^\s,;]+"#, "$1$2<redacted>"),
         (#"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"#, "Bearer <redacted>"),
+        (#"(?i)\b(authorization|auth|bearer|oauth_token|access_token|master_token|token|cookie|android[_ ]?id)(["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)"#, "$1$2<redacted>"),
         (#"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#, "<email>"),
         (#"(?i)https?://[^\s]+"#, "<url>"),
         (#"file:///[^\s]+"#, "<file-url>"),
@@ -37,7 +37,9 @@ enum DiagnosticRedactor {
     ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
 
     static func redact(_ value: String, limit: Int = 1_000) -> String {
-        var result = String(value.prefix(limit))
+        // Redact complete tokens before shortening: cutting an address or
+        // filename first can remove the suffix needed to recognize it.
+        var result = value
         for (expression, replacement) in replacements {
             let range = NSRange(result.startIndex..<result.endIndex, in: result)
             result = expression.stringByReplacingMatches(
@@ -47,7 +49,7 @@ enum DiagnosticRedactor {
                 withTemplate: replacement
             )
         }
-        return result
+        return String(result.prefix(max(0, limit)))
     }
 }
 

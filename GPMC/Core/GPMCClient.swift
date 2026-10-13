@@ -484,7 +484,18 @@ actor GPMCClient {
         let query = Proto.bytes(1, hash) + (asLivePhotoMotion ? Proto.int(5, 2) : Data())
         let check = Proto.bytes(1, Proto.bytes(1, query) + Proto.bytes(2, Data()))
         let existing = try await rpc(Self.hashCheckMethod, body: check)
-        return try Proto.string(at: [1, 2, 2, 1], in: existing)
+        // Proto.string treats an empty or invalid UTF-8 field like a missing
+        // field. A missing result means no match; a present but unusable key
+        // must fail instead of initiating another upload of uncertain status.
+        var keyData = existing
+        for field in [1, 2, 2, 1] {
+            guard let next = try Proto.fields(keyData)[field]?.first else { return nil }
+            keyData = next
+        }
+        guard let key = String(data: keyData, encoding: .utf8), !key.isEmpty else {
+            throw GPMCError(message: "Google returned an invalid media key during duplicate checking.")
+        }
+        return key
     }
 
     private func startUploadSession(file: URL, filename: String, modified: Date?, hash: Data, size: UInt64,

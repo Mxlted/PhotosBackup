@@ -585,6 +585,44 @@ final class GPMCClientTests: XCTestCase {
         XCTAssertTrue(StubProtocol.seen.isEmpty)
     }
 
+    func testMalformedDuplicateMediaKeyDoesNotStartAnotherUpload() async throws {
+        let file = try scratchFile()
+        for key in [Data(), Data([0xff])] {
+            StubProtocol.handler = { request in
+                if request.stubPath.hasSuffix("/5084965799730810217") {
+                    return .ok(Proto.bytes(1, Proto.bytes(2, Proto.bytes(2, Proto.bytes(1, key)))))
+                }
+                return Self.photosHandler()(request)
+            }
+            let client = try GPMCClient(authData: Self.credential, session: StubProtocol.session())
+            await XCTAssertThrowsGPMC(kind: .malformed) {
+                _ = try await client.prepareUpload(file: file, filename: "image.jpg") { _ in }
+            }
+            XCTAssertFalse(StubProtocol.seen.contains { $0.stubPath.contains("/uploadmedia/") },
+                           "A malformed duplicate response must not start another upload")
+        }
+    }
+
+    func testEmptyCommittedMediaKeyCannotConfirmBackup() async throws {
+        StubProtocol.handler = Self.photosHandler(committedKey: "")
+        let client = try GPMCClient(authData: Self.credential, session: StubProtocol.session())
+        await XCTAssertThrowsGPMC(kind: .malformed) {
+            _ = try await client.commit(Self.preparedFixture(), useQuota: false, saver: false) { _ in }
+        }
+    }
+
+    func testEmptyMotionMediaKeyFailsBeforeCheckingTheStill() async throws {
+        StubProtocol.handler = Self.photosHandler(existingKey: "")
+        let client = try GPMCClient(authData: Self.credential, session: StubProtocol.session())
+        let file = try scratchFile()
+        await XCTAssertThrowsGPMC(kind: .malformed) {
+            _ = try await client.prepareMotionUpload(file: file, filename: "motion.mov",
+                                                     stillHash: Data(repeating: 2, count: 20)) { _ in }
+        }
+        XCTAssertEqual(StubProtocol.seen.filter { $0.stubPath.hasSuffix("/5084965799730810217") }.count, 1)
+        XCTAssertFalse(StubProtocol.seen.contains { $0.stubPath.contains("/uploadmedia/") })
+    }
+
     func testCancellationSurfacesAsCancellationErrorNotATransportFailure() async throws {
         StubProtocol.handler = Self.photosHandler()
         let file = try scratchFile(8 * 1_048_576)

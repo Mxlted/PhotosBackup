@@ -131,6 +131,31 @@ final class DiagnosticRedactorTests: XCTestCase {
         let text = "Queued 3 new items; the queue holds 10, 4 unfinished (Wi-Fi; battery 54%, charging; HTTP 400)"
         XCTAssertEqual(DiagnosticRedactor.redact(text), text)
     }
+
+    func testTruncationCannotExposeAnAddressOrFilenamePrefix() {
+        for sensitive in ["PrivatePerson@example.com", "PrivateVacation.HEIC"] {
+            let output = DiagnosticRedactor.redact("Error: " + sensitive, limit: 16)
+            XCTAssertFalse(output.contains("Private"), output)
+            XCTAssertLessThanOrEqual(output.count, 16)
+        }
+    }
+
+    func testQuotedCredentialsAndDeviceIdentifiersAreRedacted() {
+        let input = #"{"access_token":"secret-access","master_token":"secret-master","androidId":"private-device","Authorization":"Bearer secret-bearer"}"#
+        let output = DiagnosticRedactor.redact(input)
+        for secret in ["secret-access", "secret-master", "private-device", "secret-bearer"] {
+            XCTAssertFalse(output.contains(secret), output)
+        }
+    }
+
+    func testExportRedactsLegacyEventsWithCurrentPrivacyRules() {
+        let event = DiagnosticEvent(date: Date(timeIntervalSince1970: 0), level: .error,
+                                    category: "account", message: #"Old response: {"access_token":"legacy-secret","androidId":"old-device"}"#)
+        let output = event.line(ISO8601DateFormatter())
+        XCTAssertFalse(output.contains("legacy-secret"))
+        XCTAssertFalse(output.contains("old-device"))
+        XCTAssertTrue(output.contains("Old response"))
+    }
 }
 
 final class AutomaticBackupRunHistoryTests: XCTestCase {
