@@ -56,7 +56,7 @@ struct DiagnosticReportView: View {
                         .foregroundStyle(.red)
                 }
             } footer: {
-                Text("Generate the report soon after a problem, then attach the text file to an issue at github.com/g8row/PhotosBackup/issues.")
+                Text("Generate the report soon after a problem, then attach the text file to an issue at github.com/Mxlted/PhotosBackup/issues.")
             }
 
             if let report {

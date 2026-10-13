@@ -405,7 +405,10 @@ enum DiagnosticReportBuilder {
 extension DiagnosticEvent {
     /// One line of the report's timeline, and of "Copy All" in the app.
     func line(_ formatter: ISO8601DateFormatter) -> String {
-        var text = "\(formatter.string(from: date)) [\(level.rawValue.uppercased())] [\(category)] \(message)"
+        // Reapply current privacy rules to entries written by older versions.
+        let safeCategory = DiagnosticRedactor.redact(category, limit: 80)
+        let safeMessage = DiagnosticRedactor.redact(message)
+        var text = "\(formatter.string(from: date)) [\(level.rawValue.uppercased())] [\(safeCategory)] \(safeMessage)"
         if occurrences > 1 {
             text += " (×\(occurrences)" + (firstDate.map { " since \(formatter.string(from: $0))" } ?? "") + ")"
         }

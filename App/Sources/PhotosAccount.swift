@@ -12,6 +12,8 @@ final class PhotosAccount: ObservableObject {
     enum VerificationOutcome: Equatable {
         case succeeded
         case failed(String)
+        /// The account changed before this check finished; discard its result.
+        case superseded
     }
 
     enum Status: Equatable {
@@ -39,15 +41,18 @@ final class PhotosAccount: ObservableObject {
     private let store: CredentialStore
     private let requestNetworkPolicy: UploadRequestNetworkPolicy
     private let fileUploadTransport: any FileUploadTransport
+    private let verifyClient: (GPMCClient) async throws -> Void
     private var credential: StoredCredential?
     private var client: GPMCClient?
 
     init(store: CredentialStore = CredentialStore(),
          requestNetworkPolicy: UploadRequestNetworkPolicy = UploadRequestNetworkPolicy(),
-         fileUploadTransport: any FileUploadTransport = BackgroundFileUploadTransport.shared) {
+         fileUploadTransport: any FileUploadTransport = BackgroundFileUploadTransport.shared,
+         verifyClient: @escaping (GPMCClient) async throws -> Void = { try await $0.validateReadAccess() }) {
         self.store = store
         self.requestNetworkPolicy = requestNetworkPolicy
         self.fileUploadTransport = fileUploadTransport
+        self.verifyClient = verifyClient
     }
 
     func setCellularUploadsAllowed(_ allowed: Bool) {
@@ -120,11 +125,15 @@ final class PhotosAccount: ObservableObject {
         verifying = true
         defer { verifying = false }
         do {
-            try await client.validateReadAccess()
+            try await verifyClient(client)
+            guard self.client === client else { return .superseded }
             if let credential { status = .connected(email: credential.email, since: credential.connectedAt) }
             DiagnosticEventLog.shared.record("account", "Connection check passed: Google accepted the credential")
             return .succeeded
         } catch {
+            // A suspended check still belongs to its original client. A late
+            // rejection must not disconnect a newly connected account.
+            guard self.client === client else { return .superseded }
             report(error)
             DiagnosticEventLog.shared.record("account", "Connection check failed: \(Self.describe(error))", level: .warning)
             return .failed(Self.describe(error))

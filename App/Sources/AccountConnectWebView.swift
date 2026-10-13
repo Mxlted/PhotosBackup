@@ -38,7 +38,7 @@ struct AccountConnectView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { onCancel() }
+                    Button("Cancel") { didCapture = true; onCancel() }
                 }
             }
         }
@@ -47,7 +47,7 @@ struct AccountConnectView: View {
 }
 
 /// The `WKWebView` and the cookie-store observer that watches for `oauth_token`.
-private struct EmbeddedSetupWebView: UIViewRepresentable {
+struct EmbeddedSetupWebView: UIViewRepresentable {
     @Binding var loading: Bool
     var onToken: (String) -> Void
 
@@ -94,6 +94,7 @@ private struct EmbeddedSetupWebView: UIViewRepresentable {
         private let loading: Binding<Bool>
         private let onToken: (String) -> Void
         private var captured = false
+        private var stopped = false
         private var pollTimer: Timer?
         weak var cookieStore: WKHTTPCookieStore?
 
@@ -113,28 +114,35 @@ private struct EmbeddedSetupWebView: UIViewRepresentable {
         }
 
         func stop() {
+            stopped = true
             pollTimer?.invalidate()
             pollTimer = nil
             cookieStore?.remove(self)
+            cookieStore = nil
         }
 
         private func checkForToken() {
-            guard !captured, let store = cookieStore else { return }
+            guard !captured, !stopped, let store = cookieStore else { return }
             store.getAllCookies { [weak self] cookies in self?.capture(from: cookies) }
         }
 
-        private func capture(from cookies: [HTTPCookie]) {
-            guard !captured else { return }
+        func capture(from cookies: [HTTPCookie]) {
+            guard !captured, !stopped else { return }
             guard let cookie = cookies.first(where: {
                 $0.name == Self.cookieName
-                    && $0.domain.contains("accounts.google.com")
+                    && ["accounts.google.com", ".accounts.google.com"].contains($0.domain.lowercased())
                     && !$0.value.isEmpty
             }) else { return }
             captured = true
             pollTimer?.invalidate()
             pollTimer = nil
             let value = cookie.value
-            DispatchQueue.main.async { self.onToken(value) }
+            DispatchQueue.main.async { [weak self] in
+                // Cancel/dismiss may tear down the view after the cookie read
+                // but before this queued handoff. Never spend that token then.
+                guard let self, !self.stopped else { return }
+                self.onToken(value)
+            }
         }
 
         /// The full mobile-Safari UA for the running iOS version.

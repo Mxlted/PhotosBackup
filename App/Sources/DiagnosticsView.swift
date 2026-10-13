@@ -137,11 +137,12 @@ struct DiagnosticsView: View {
 
             Section {
                 DisclosureGroup("Advanced: Paste oauth_token", isExpanded: $showAdvanced) {
-                    TextField("oauth_token value", text: $manualToken)
+                    SecureField("oauth_token value", text: $manualToken)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().font(.footnote.monospaced()).lineLimit(4)
                     Button("Run Exchange") {
                         let token = manualToken.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !token.isEmpty else { return }
+                        manualToken = ""
                         log.set(ProbeLog.cookieRead, .skipped, "manual paste")
                         log.set(ProbeLog.nativeHandoff, .skipped, "manual paste")
                         log.set(ProbeLog.appIngest, .skipped, "manual paste")

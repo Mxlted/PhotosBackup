@@ -2,9 +2,8 @@ import Photos
 import XCTest
 @testable import PhotosBackup
 
-/// Only the file-backed paths are exercised here — the `PHAsset` and
-/// `PhotosPickerItem` paths need a real photo library and a user tap, so they
-/// stay out of the offline suite.
+/// File-backed export and the PhotoKit callback bridge are exercised without
+/// a photo library. Resource selection itself still needs device verification.
 final class MediaExportTests: XCTestCase {
 
     private func scratch(_ contents: Data, named name: String) throws -> URL {
@@ -140,5 +139,116 @@ final class MediaExportTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: kept.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
         await exporter.purge()
+    }
+
+    func testFailedStagingCopyRemovesItsDirectory() throws {
+        let root = MediaExporter.root
+        let before = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+        let missing = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        XCTAssertThrowsError(try MediaExporter.adopt(missing))
+        let after = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+        XCTAssertEqual(after, before)
+    }
+
+    func testOnlyVerifiedAdjustmentMetadataIdentifiesTheEditor() throws {
+        for format in [MediaExporter.googlePhotosEditFormat, "com.example.other-editor"] {
+            let data = try PropertyListSerialization.data(fromPropertyList: ["adjustmentFormatIdentifier": format],
+                                                           format: .binary, options: 0)
+            XCTAssertEqual(try MediaExporter.adjustmentFormat(from: data), format)
+        }
+        let malformed: [Data] = try [
+            Data(), Data("not a property list".utf8),
+            PropertyListSerialization.data(fromPropertyList: [:], format: .binary, options: 0),
+            PropertyListSerialization.data(fromPropertyList: ["adjustmentFormatIdentifier": ""], format: .binary, options: 0),
+            PropertyListSerialization.data(fromPropertyList: ["adjustmentFormatIdentifier": 1], format: .binary, options: 0)
+        ]
+        for data in malformed {
+            XCTAssertThrowsError(try MediaExporter.adjustmentFormat(from: data)) { error in
+                XCTAssertNotEqual(error as? MediaExporter.Failure, .noEditBase,
+                                  "unverified metadata must not settle an edit-base row as backed up")
+            }
+        }
+    }
+
+    func testResourceReadFailureIsPropagatedInsteadOfReturningPartialMetadata() async {
+        let failure = NSError(domain: PHPhotosErrorDomain, code: 3164)
+        do {
+            try await PhotoResourceReader.read(start: { data, completion in
+                data(Data("partial metadata".utf8))
+                completion(failure)
+                return 1
+            }, cancel: { _ in }, consume: { _ in })
+            XCTFail("a failed read must never be treated as a verified non-Google edit")
+        } catch {
+            XCTAssertEqual(error as NSError, failure)
+        }
+    }
+
+    func testResourceReadCancellationCancelsPhotoKitAndReleasesTheCaller() async {
+        let started = expectation(description: "PhotoKit request started")
+        let request = ResourceRequestStub(started: started)
+        let task = Task {
+            try await PhotoResourceReader.read(start: request.start, cancel: { request.cancel($0) }, consume: { _ in })
+        }
+        await fulfillment(of: [started], timeout: 2)
+        task.cancel()
+        do {
+            try await task.value
+            XCTFail("expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(request.cancelledIDs, [42])
+    }
+
+    func testConsumerFailureBeforeRequestIDArrivesCancelsAndPreservesOriginalError() async {
+        let failure = CocoaError(.fileWriteOutOfSpace)
+        let request = ResourceRequestStub(firstChunk: Data([1]))
+        do {
+            try await PhotoResourceReader.read(start: request.start, cancel: { request.cancel($0) }) { _ in
+                throw failure
+            }
+            XCTFail("expected the disk write failure")
+        } catch {
+            XCTAssertEqual(error as NSError, failure as NSError)
+        }
+        XCTAssertEqual(request.cancelledIDs, [42], "cancellation must survive until PhotoKit returns its ID")
+    }
+}
+
+/// No timers or library access: cancellation delivers PhotoKit's terminal callback.
+private final class ResourceRequestStub: @unchecked Sendable {
+    private let lock = NSLock()
+    private let started: XCTestExpectation?
+    private let firstChunk: Data?
+    private var completion: ((Error?) -> Void)?
+    private var cancellations: [PHAssetResourceDataRequestID] = []
+
+    init(started: XCTestExpectation? = nil, firstChunk: Data? = nil) {
+        self.started = started
+        self.firstChunk = firstChunk
+    }
+
+    var cancelledIDs: [PHAssetResourceDataRequestID] {
+        lock.lock(); defer { lock.unlock() }
+        return cancellations
+    }
+
+    func start(data: @escaping (Data) -> Void, completion: @escaping (Error?) -> Void) -> PHAssetResourceDataRequestID {
+        lock.lock()
+        self.completion = completion
+        lock.unlock()
+        if let firstChunk { data(firstChunk) }
+        started?.fulfill()
+        return 42
+    }
+
+    func cancel(_ id: PHAssetResourceDataRequestID) {
+        lock.lock()
+        cancellations.append(id)
+        let completion = self.completion
+        self.completion = nil
+        lock.unlock()
+        completion?(NSError(domain: PHPhotosErrorDomain, code: 3072))
     }
 }

@@ -55,8 +55,7 @@ final class AccountConnector: ObservableObject {
             return
         }
 
-        log.set(ProbeLog.masterToken, .passed,
-                "account: \(result.email) · androidId: \(result.androidId)")
+        log.set(ProbeLog.masterToken, .passed, "master token issued")
         log.set(ProbeLog.photosToken, result.encrypted ? .skipped : .passed,
                 result.encrypted
                     ? "TokenEncrypted=1 — bound token, not decoded by this connector"

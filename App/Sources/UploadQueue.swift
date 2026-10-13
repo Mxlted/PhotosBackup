@@ -211,6 +211,7 @@ final class UploadQueue: ObservableObject {
     /// because the dashboard's "Backed up" metric is derived from its count.
     @Published private(set) var completedSourceKeys: Set<String> = []
     private var completionLedgerHealthy = true
+    private var completionLedgerOverrides: [String: [String]] = [:]
     /// Same reasoning as `isUserPaused`: this narrows what `pump` may start.
     private var drainsBackgroundCompletionsOnly = false { didSet { scanCursor = 0 } }
     /// Set while a `cancelAll` is settling, so the rows it cancels are dropped
@@ -754,18 +755,24 @@ final class UploadQueue: ObservableObject {
         completedSourceKeys = []
         completionLedgerHealthy = true
         haltReason = nil
-        systemPauseReason = nil
         endRateLimitPause()
         isUserPaused = false
         persistenceWarning = nil
 
         guard let normalized, let persistence else { return }
         do {
-            let ledgerKeys = try persistence.loadCompletedSourceKeys(for: normalized)
-            guard let snapshot = try persistence.load(),
-                  snapshot.version == UploadQueueSnapshot.version,
-                  snapshot.accountIdentifier == normalized else {
-                completedSourceKeys = Set(ledgerKeys)
+            let saved = try persistence.load()
+            if saved?.version == UploadQueueSnapshot.version {
+                // The snapshot save before an account switch may also have
+                // failed. Keep newer in-memory invalidations until a later
+                // successful save can make them durable.
+                completionLedgerOverrides.merge(saved?.completionLedgerOverrides ?? [:]) { current, _ in current }
+            }
+            let snapshot = saved.flatMap {
+                $0.version == UploadQueueSnapshot.version && $0.accountIdentifier == normalized ? $0 : nil
+            }
+            try restoreCompletions(from: snapshot, for: normalized, persistence: persistence)
+            guard let snapshot else {
                 _ = takePreparationMarkers()
                 persistNow()
                 DiagnosticEventLog.shared.record(
@@ -774,14 +781,6 @@ final class UploadQueue: ObservableObject {
                 )
                 return
             }
-            if persistence.storesCompletionLedgerSeparately {
-                // One batched append. Per-key writes here meant one file-handle
-                // open and close for every photo the library had ever backed up.
-                do { try persistence.recordCompletedSourceKeys(snapshot.completedSourceKeys, for: normalized) }
-                catch { completionLedgerHealthy = false }
-            }
-            completedSourceKeys = Set(snapshot.completedSourceKeys)
-            completedSourceKeys.formUnion(ledgerKeys)
             isUserPaused = snapshot.isUserPaused ?? false
             items = snapshot.items.compactMap { stored in
                 if let key = stored.mediaSource.queueDeduplicationKey,
@@ -802,7 +801,9 @@ final class UploadQueue: ObservableObject {
             }
             rebuildDerivedState()
             if persistence.storesCompletionLedgerSeparately,
-               !snapshot.completedSourceKeys.isEmpty { persistNow() }
+               !snapshot.completedSourceKeys.isEmpty || completionLedgerOverrides[normalized] != nil {
+                persistNow()
+            }
             DiagnosticEventLog.shared.record(
                 "queue",
                 "Restored the upload queue: \(items.count) rows, \(activeCount) unfinished, \(failedCount) failed; \(completedSourceKeys.count) items remembered as backed up"
@@ -818,6 +819,35 @@ final class UploadQueue: ObservableObject {
                 "Queue restore failed: \(error.localizedDescription)",
                 level: .error
             )
+        }
+    }
+
+    /// Recover a failed ledger update before returning to compact snapshots.
+    /// Keep overrides for other accounts until each ledger has been repaired.
+    private func restoreCompletions(from snapshot: UploadQueueSnapshot?, for identifier: String,
+                                    persistence: UploadQueuePersisting) throws {
+        if let override = completionLedgerOverrides[identifier] {
+            completedSourceKeys = Set(override)
+            if persistence.storesCompletionLedgerSeparately {
+                do {
+                    let ledgerKeys = Set(try persistence.loadCompletedSourceKeys(for: identifier))
+                    try persistence.removeCompletedSourceKeys(
+                        ledgerKeys.subtracting(completedSourceKeys), for: identifier)
+                    try persistence.recordCompletedSourceKeys(override, for: identifier)
+                } catch {
+                    completionLedgerHealthy = false
+                    persistenceWarning = "Upload completion could not be saved: \(error.localizedDescription)"
+                }
+            }
+        } else {
+            completedSourceKeys = Set(snapshot?.completedSourceKeys ?? [])
+            completedSourceKeys.formUnion(try persistence.loadCompletedSourceKeys(for: identifier))
+            if persistence.storesCompletionLedgerSeparately {
+                // Batch legacy snapshot migration rather than opening one file
+                // handle for every previously completed library item.
+                do { try persistence.recordCompletedSourceKeys(snapshot?.completedSourceKeys ?? [], for: identifier) }
+                catch { completionLedgerHealthy = false }
+            }
         }
     }
 
@@ -934,7 +964,7 @@ final class UploadQueue: ObservableObject {
         while !isIdle {
             if Task.isCancelled { return false }
             if let deadline, Date() >= deadline { return false }
-            if networkPauseReason != nil || systemPauseReason != nil { return false }
+            if haltReason != nil || networkPauseReason != nil || systemPauseReason != nil { return false }
             if isUserPaused && running.isEmpty { return false }
             if running.isEmpty && !hasWorkableItems {
                 return haltReason == nil
@@ -1337,13 +1367,19 @@ final class UploadQueue: ObservableObject {
                                            interruptedPreparations: interruptions, motion: motion, editBase: editBase)
             }
         }
+        if completionLedgerHealthy {
+            completionLedgerOverrides[accountIdentifier] = nil
+        } else {
+            completionLedgerOverrides[accountIdentifier] = Array(completedSourceKeys)
+        }
         let snapshot = UploadQueueSnapshot(
             version: UploadQueueSnapshot.version,
             accountIdentifier: accountIdentifier,
             items: storedItems,
             completedSourceKeys: persistence.storesCompletionLedgerSeparately && completionLedgerHealthy
                 ? [] : Array(completedSourceKeys),
-            isUserPaused: isUserPaused
+            isUserPaused: isUserPaused,
+            completionLedgerOverrides: completionLedgerOverrides.isEmpty ? nil : completionLedgerOverrides
         )
         do {
             try persistence.save(snapshot)

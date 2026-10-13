@@ -70,12 +70,14 @@ final class AutomaticBackupCoordinator: ObservableObject {
     private let albums: PhotoAlbumStore
     private let network: NetworkPolicyMonitor
     private let libraryChanges: PhotoLibraryChangeTracker
+    private let execution: BackupExecutionController
 
     private var registered = false
     private var ranForegroundBackup = false
-    private var isForeground = true
+    private var isForeground: Bool { execution.isForeground }
     private var shouldRunAfterActivation = false
     private var backgroundOperation: Task<Void, Never>?
+    private var backgroundRunID: UUID?
     private var foregroundOperation: Task<Void, Never>?
     private var foregroundRunID: UUID?
     /// The scheduling outcome last written to the event log. `updateSchedule`
@@ -115,6 +117,7 @@ final class AutomaticBackupCoordinator: ObservableObject {
         self.albums = albums
         self.network = network
         self.libraryChanges = libraryChanges ?? PhotoLibraryChangeTracker()
+        self.execution = BackupExecutionController(queue: queue)
         queue.followUpSources = { [weak self] source in
             self?.followUps(after: source) ?? []
         }
@@ -152,9 +155,7 @@ final class AutomaticBackupCoordinator: ObservableObject {
     }
 
     func start() async {
-        isForeground = UIApplication.shared.applicationState == .active
-        queue.setPreparationGuardArmed(isForeground)
-        queue.setICloudDownloadsAllowed(isForeground)
+        execution.setForeground(UIApplication.shared.applicationState == .active)
         await photos.start()
         await queueEditedVersionsOnce()
         await queueEditBasesOnce()
@@ -245,6 +246,7 @@ final class AutomaticBackupCoordinator: ObservableObject {
         // The library read runs off the main actor; the account can change meanwhile.
         guard account.status.email == email else { return }
         let queued = queue.enqueue(bases, skippingExisting: true).count
+        guard queue.persistenceWarning == nil else { return }
         UserDefaults.standard.set(true, forKey: flag)
         DiagnosticEventLog.shared.record(
             "queue",
@@ -312,6 +314,7 @@ final class AutomaticBackupCoordinator: ObservableObject {
         // The library read runs off the main actor; the account can change meanwhile.
         guard account.status.email == email else { return }
         let result = queue.reverify(edited)
+        guard queue.persistenceWarning == nil else { return }
         UserDefaults.standard.set(true, forKey: flag)
         DiagnosticEventLog.shared.record(
             "queue",
@@ -321,7 +324,7 @@ final class AutomaticBackupCoordinator: ObservableObject {
 
     func applicationDidEnterBackground() {
         cancelForegroundScan()
-        isForeground = false
+        execution.setForeground(false)
         let continuing = continuesInBackground
         if continuing {
             // iOS keeps the app running under the continued task, so the work
@@ -329,11 +332,8 @@ final class AutomaticBackupCoordinator: ObservableObject {
             queue.setMaxConcurrent(min(preferences.concurrentUploads, ContinuedBackupPolicy.backgroundConcurrencyLimit))
             AppSessionTracker.note(.backgroundWork)
             beginContinuedRun()
-        } else {
-            // Anything still exporting is about to be frozen, not crashed.
-            queue.setPreparationGuardArmed(false)
-            queue.setICloudDownloadsAllowed(false)
         }
+        if execution.hasExecutionTime { AppSessionTracker.note(.backgroundWork) }
         queue.flushPendingWrites()
         shouldRunAfterActivation = true
         updateSchedule()
@@ -348,12 +348,9 @@ final class AutomaticBackupCoordinator: ObservableObject {
     }
 
     func applicationDidBecomeActive() {
-        isForeground = true
+        execution.setForeground(true)
         finishContinuedRun(success: true, ending: "the app was opened")
         queue.setMaxConcurrent(preferences.concurrentUploads)
-        queue.setPreparationGuardArmed(true)
-        queue.setICloudDownloadsAllowed(true)
-        queue.resumeSystemWork()
         if shouldRunAfterActivation {
             shouldRunAfterActivation = false
             ranForegroundBackup = false
@@ -676,6 +673,12 @@ final class AutomaticBackupCoordinator: ObservableObject {
     }
 
     private func begin(_ task: BGProcessingTask, window: BackgroundWindow) {
+        guard !window.isExpired else {
+            task.expirationHandler = nil
+            task.setTaskCompleted(success: false)
+            updateSchedule()
+            return
+        }
         Self.logger.info("Beginning an iOS background-processing window")
         let submitted = UserDefaults.standard.double(forKey: Self.lastRequestSubmittedKey)
         let waited = submitted > 0
@@ -685,14 +688,16 @@ final class AutomaticBackupCoordinator: ObservableObject {
         AppSessionTracker.note(.backgroundWork)
         let run = AutomaticBackupRunHistory.started(.backgroundProcessing, context: executionContext())
         let startedAt = Date()
-        isForeground = false
+        let previousRunID = backgroundRunID
+        let executionID = execution.begin(.processing, foreground: UIApplication.shared.applicationState == .active)
+        backgroundRunID = executionID
+        // Install the new owner before releasing an older one. Its cancelled
+        // operation may finish later, but can only release its own window.
+        if let previousRunID { execution.end(previousRunID) }
         // Log the resubmission below even though its state has not changed:
         // it is what shows the chain of windows continues.
         loggedScheduleState = nil
         updateSchedule()
-        queue.setPreparationGuardArmed(true)
-        if !continuesInBackground { queue.setICloudDownloadsAllowed(false) }
-        queue.resumeSystemWork()
         backgroundOperation?.cancel()
 
         let operation = Task { @MainActor [weak self, weak task] in
@@ -702,16 +707,17 @@ final class AutomaticBackupCoordinator: ObservableObject {
             }
             let report = await self.performBackgroundBackup()
             AutomaticBackupRunHistory.finished(run, success: report.success, summary: report.summary)
-            // A continued backup keeps the process running after the window.
-            let keepsRunning = self.isForeground || self.continuesInBackground
-            self.queue.setPreparationGuardArmed(keepsRunning)
-            if !keepsRunning { AppSessionTracker.note(.background) }
+            self.execution.end(executionID)
+            if !self.execution.hasExecutionTime { AppSessionTracker.note(.background) }
             // iOS may suspend the process as soon as the task completes.
             DiagnosticEventLog.shared.flush()
             task?.expirationHandler = nil
             task?.setTaskCompleted(success: report.success)
             Self.logger.info("Background-processing window finished; success=\(report.success)")
-            self.backgroundOperation = nil
+            if self.backgroundRunID == executionID {
+                self.backgroundOperation = nil
+                self.backgroundRunID = nil
+            }
         }
         backgroundOperation = operation
         let expire: @Sendable () -> Void = { [weak self] in
@@ -724,9 +730,9 @@ final class AutomaticBackupCoordinator: ObservableObject {
             )
             operation.cancel()
             Task { @MainActor [weak self] in
-                // The queue keeps going when a continued backup holds the app.
-                guard let self, !self.continuesInBackground else { return }
-                self.queue.suspendForBackgroundExpiration()
+                // Expiration releases only this window. Foreground work,
+                // another processing window or a Shortcut may still own time.
+                self?.execution.end(executionID)
             }
         }
         task.expirationHandler = expire
@@ -762,8 +768,20 @@ final class AutomaticBackupCoordinator: ObservableObject {
     private func performBackgroundBackup(settlementDeadline: Date? = nil,
                                          requiresAutomaticBackup: Bool = true,
                                          waitsForUploads: Bool = true) async -> BackgroundRunReport {
+        func interruption() -> BackgroundRunReport? {
+            if Task.isCancelled {
+                return .init(success: true, summary: "The execution window ended; unfinished work stays queued")
+            }
+            if let settlementDeadline, Date() >= settlementDeadline {
+                return .init(success: true, summary: "The execution budget ended; unfinished work stays queued")
+            }
+            return nil
+        }
+        if let report = interruption() { return finish(report) }
         await photos.start()
+        if let report = interruption() { return finish(report) }
         _ = await network.waitForInitialStatus()
+        if let report = interruption() { return finish(report) }
         applyNetworkPolicy()
 
         // A user pause is durable and must not be bypassed by a scheduled run.
@@ -780,19 +798,24 @@ final class AutomaticBackupCoordinator: ObservableObject {
                                 summary: decision.pauseReason ?? "The connection policy does not allow uploads"))
         }
 
+        let email = account.status.email
+        let selected = preferences.selectedAlbumIDs
         await albums.refresh()
+        if let report = interruption() { return finish(report) }
+        guard account.status.email == email, preferences.selectedAlbumIDs == selected else {
+            return finish(.init(success: true, summary: "The account or album selection changed; the next run will scan it"))
+        }
         guard albums.canRead else {
             return finish(.init(success: false,
                                 summary: "No photo library access (\(DiagnosticReportBuilder.photoAuthorization()))"))
         }
-        // Release earlier transport/5xx failures before scanning. They are
+        let scan = libraryChanges.scan(albums: albums, selectedAlbumIDs: selected, accountIdentifier: email)
+        if let report = interruption() { return finish(report) }
+        // Release earlier transport/5xx failures before enqueueing. They are
         // invisible to the scan (the dedup treats a failed row as a durable
         // handle), so without this a network blip parks those items forever.
         let released = queue.retryRetryableFailures()
         let failuresBefore = queue.failedCount
-        let scan = libraryChanges.scan(albums: albums,
-                                       selectedAlbumIDs: preferences.selectedAlbumIDs,
-                                       accountIdentifier: account.status.email)
         let outcome = enqueueScan(scan, limit: Self.backgroundBatchLimit)
 
         let backedUpBefore = queue.completedSourceCount
@@ -854,10 +877,10 @@ final class AutomaticBackupCoordinator: ObservableObject {
         let startedAt = Date()
         // Two runs over one queue would each requeue the other's work as they
         // ended. The window already scans for new photos.
-        if backgroundOperation != nil {
+        if execution.hasPreparationWindow {
             DiagnosticEventLog.shared.record(
                 "shortcut",
-                "Back Up Photos ran during a background window, so it left the work to that window"
+                "Back Up Photos ran during another backup window, so it left the work to that window"
             )
             return BackgroundRunReport(
                 success: true,
@@ -866,30 +889,24 @@ final class AutomaticBackupCoordinator: ObservableObject {
         }
         let appActive = UIApplication.shared.applicationState == .active
         let run = AutomaticBackupRunHistory.started(.shortcut, context: executionContext())
-        if !appActive {
-            isForeground = false
-            AppSessionTracker.note(.backgroundWork)
-            queue.setPreparationGuardArmed(true)
-            if !continuesInBackground { queue.setICloudDownloadsAllowed(false) }
+        let executionID = execution.begin(.processing, foreground: appActive)
+        defer {
+            execution.end(executionID)
+            if !execution.hasExecutionTime { AppSessionTracker.note(.background) }
+            DiagnosticEventLog.shared.flush()
         }
-        queue.resumeSystemWork()
+        if !appActive {
+            AppSessionTracker.note(.backgroundWork)
+        }
         updateSchedule()
         let report = await performBackgroundBackup(
             settlementDeadline: startedAt.addingTimeInterval(Self.shortcutBudget),
             requiresAutomaticBackup: false,
             waitsForUploads: !appActive
         )
-        // In the background the process is suspended once the action returns.
-        // Requeue whatever has not reached iOS's transfer service, so it resumes
-        // at the next opportunity instead of freezing mid-export. With the app
-        // open, the foreground simply carries on.
-        if UIApplication.shared.applicationState != .active, !continuesInBackground {
-            if !queue.isIdle { queue.suspendForBackgroundExpiration() }
-            queue.setPreparationGuardArmed(false)
-            AppSessionTracker.note(.background)
-        }
+        // Releasing this action's window only suspends preparation when no
+        // foreground, processing or continued task acquired time meanwhile.
         AutomaticBackupRunHistory.finished(run, success: report.success, summary: report.summary)
-        DiagnosticEventLog.shared.flush()
         return report
     }
 
@@ -934,32 +951,25 @@ final class AutomaticBackupCoordinator: ObservableObject {
     /// PUT receipts reach the small commit RPC.
     func handleBackgroundURLSessionEvents() async {
         let run = AutomaticBackupRunHistory.started(.backgroundTransfer, context: executionContext())
-        isForeground = UIApplication.shared.applicationState == .active
-        // Under a continued backup the process is running anyway: treat the
-        // wake like the open app and leave the queue as it is.
-        if !isForeground, !continuesInBackground {
+        let appActive = UIApplication.shared.applicationState == .active
+        if !appActive, !continuesInBackground, !execution.hasPreparationWindow {
             AppSessionTracker.note(.backgroundWork)
-            // Filter before restoration so `activateAccount`'s internal pump
-            // cannot start fresh exports, and pause network so nothing pumps
-            // before the real policy is applied below.
-            queue.noteBackgroundTransferCompletionsPending()
+            // Pause before installing the transfer-only owner and restoring
+            // the queue, so nothing starts before the real policy is applied.
             queue.setNetworkAccess(allowed: false, pauseReason: "Restoring background transfers")
+        }
+        let executionID = execution.begin(.transferDelivery, foreground: appActive)
+        defer {
+            execution.end(executionID)
+            if !execution.hasExecutionTime { AppSessionTracker.note(.background) }
         }
         await photos.start()
         let completedBefore = queue.completedSourceCount
         _ = await network.waitForInitialStatus()
         applyNetworkPolicy()
-        isForeground = UIApplication.shared.applicationState == .active
-        if !continuesInBackground { queue.setICloudDownloadsAllowed(isForeground) }
-        if isForeground || continuesInBackground { queue.resumeSystemWork() }
-        else { queue.resumeBackgroundTransferCompletions() }
+        execution.setForeground(UIApplication.shared.applicationState == .active)
         await queue.waitUntilBackgroundTransfersHandled()
-        isForeground = UIApplication.shared.applicationState == .active
-        if isForeground || continuesInBackground { queue.resumeSystemWork() }
-        else {
-            queue.finishBackgroundTransferCompletions()
-            AppSessionTracker.note(.background)
-        }
+        execution.setForeground(UIApplication.shared.applicationState == .active)
         let confirmed = max(0, queue.completedSourceCount - completedBefore)
         AutomaticBackupRunHistory.finished(
             run,
@@ -971,9 +981,11 @@ final class AutomaticBackupCoordinator: ObservableObject {
 
 #if DEBUG
     func simulateRun() {
-        guard backgroundOperation == nil else { return }
+        guard !execution.hasPreparationWindow else { return }
         debugSimulationStatus = "Running…"
         let run = AutomaticBackupRunHistory.started(.debugSimulation, context: executionContext())
+        let executionID = execution.begin(.processing)
+        backgroundRunID = executionID
         queue.setICloudDownloadsAllowed(false)
         backgroundOperation = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -981,7 +993,11 @@ final class AutomaticBackupCoordinator: ObservableObject {
             self.debugSimulationStatus = report.summary
             AutomaticBackupRunHistory.finished(run, success: report.success, summary: report.summary)
             if self.isForeground { self.queue.setICloudDownloadsAllowed(true) }
-            self.backgroundOperation = nil
+            self.execution.end(executionID)
+            if self.backgroundRunID == executionID {
+                self.backgroundOperation = nil
+                self.backgroundRunID = nil
+            }
         }
     }
 #endif
@@ -1019,13 +1035,13 @@ extension AutomaticBackupCoordinator {
     }
     #endif
 
-    private var queueCanMoveOnItsOwn: Bool {
+    private func queueCanMoveOnItsOwn(ignoringSystemPause: Bool = false) -> Bool {
         ContinuedBackupPolicy.shouldContinue(
             hasWorkableItems: queue.hasWorkableItems,
             userPaused: queue.isUserPaused,
             halted: queue.haltReason != nil,
             networkPaused: queue.networkPauseReason != nil,
-            systemPaused: queue.systemPauseReason != nil
+            systemPaused: !ignoringSystemPause && queue.systemPauseReason != nil
         )
     }
 
@@ -1039,11 +1055,17 @@ extension AutomaticBackupCoordinator {
                 "iOS accepted the request to keep the backup running but did not start it; trying again later",
                 level: .warning
             )
+            execution.setContinuedProcessing(false)
             session.finish()
             return
         }
         if session.isActive {
-            guard queueCanMoveOnItsOwn else { return endContinuedBackup(session) }
+            // Leaving the foreground pauses preparation until the submitted
+            // task actually starts. That pause must not cancel its own pending
+            // execution grant; adoption will resume the queue.
+            guard queueCanMoveOnItsOwn(ignoringSystemPause: !session.isRunning) else {
+                return endContinuedBackup(session)
+            }
             let progress = ContinuedBackupProgress(settledSinceStart: queue.settledRowCount - session.settledAtStart,
                                                    unfinished: queue.activeCount)
             let waiting = queue.rateLimitPauseReason == nil ? nil : "Waiting: Google asked the app to slow down"
@@ -1051,7 +1073,7 @@ extension AutomaticBackupCoordinator {
             return
         }
         // iOS accepts the request only from the app in the foreground.
-        guard UIApplication.shared.applicationState == .active, queueCanMoveOnItsOwn,
+        guard UIApplication.shared.applicationState == .active, queueCanMoveOnItsOwn(),
               account.status.isUsable else { return }
         if let retryAfter = continuedRetryAfter, Date() < retryAfter { return }
         let permitted = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
@@ -1090,7 +1112,8 @@ extension AutomaticBackupCoordinator {
         let reason = idle ? "nothing is left to back up" : (queue.pauseReason ?? "nothing can move on its own")
         finishContinuedRun(success: idle, ending: reason)
         DiagnosticEventLog.shared.record("scheduler", "Ended the background continuation: \(reason)")
-        if UIApplication.shared.applicationState != .active { settleIntoSuspension() }
+        execution.setContinuedProcessing(false)
+        if !execution.hasExecutionTime { AppSessionTracker.note(.background) }
         // iOS may suspend the app as soon as it hears the task is over.
         DiagnosticEventLog.shared.flush()
         session.finish()
@@ -1100,9 +1123,9 @@ extension AutomaticBackupCoordinator {
     /// iOS normally starts the task while the app is open. If it started it
     /// only after the app left, take up the background settings now.
     private func continuedBackupStarted() {
+        execution.setContinuedProcessing(true)
         guard UIApplication.shared.applicationState == .background else { return }
         queue.setMaxConcurrent(min(preferences.concurrentUploads, ContinuedBackupPolicy.backgroundConcurrencyLimit))
-        queue.setPreparationGuardArmed(true)
         AppSessionTracker.note(.backgroundWork)
         beginContinuedRun()
     }
@@ -1123,20 +1146,9 @@ extension AutomaticBackupCoordinator {
             level: .warning
         )
         finishContinuedRun(success: false, ending: "iOS ended it")
-        if UIApplication.shared.applicationState != .active {
-            queue.suspendForBackgroundExpiration()
-            settleIntoSuspension()
-        }
+        execution.setContinuedProcessing(false)
+        if !execution.hasExecutionTime { AppSessionTracker.note(.background) }
         DiagnosticEventLog.shared.flush()
-    }
-
-    /// The hand-over leaving the foreground makes when nothing keeps the app
-    /// running, for when the continued task ends in the background.
-    private func settleIntoSuspension() {
-        queue.setPreparationGuardArmed(false)
-        queue.setICloudDownloadsAllowed(false)
-        queue.flushPendingWrites()
-        AppSessionTracker.note(.background)
     }
 
     private func beginContinuedRun() {
@@ -1164,6 +1176,12 @@ final class BackgroundWindow: @unchecked Sendable {
     private let lock = NSLock()
     private var expired = false
     private var handler: (@Sendable () -> Void)?
+
+    var isExpired: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return expired
+    }
 
     func expire() {
         lock.lock()

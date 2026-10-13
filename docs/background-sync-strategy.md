@@ -3,6 +3,15 @@
 Research date: 2026-09-10. Local code reviewed at `3625060`.
 Status: strategy selected. The first increment adds a Shortcuts trigger on iOS 16+, storage visibility and safe orphan cleanup. Transport restructuring and optional arrival-home discovery remain follow-up work.
 
+Implementation update (2026-10-13): the fork now includes iOS 26 continued
+processing and Live Photo motion support. Execution-window ownership is shared
+through `BackupExecutionController`: expiration or completion of one window
+cannot suspend an active foreground, continued, processing, or Shortcut owner.
+Offline tests cover these transitions, receipt delivery during task enumeration,
+and account-scoped completion recovery after ledger failures. Natural scheduling,
+iCloud retrieval, and prolonged device backup still require physical-device
+evidence. The research and proposals below retain their historical context.
+
 The priority is **new photos backing up unattended even when the app is rarely opened**. Keep iOS 15 support and, initially, the existing on-device Google Photos integration.
 
 ## Recommendation
@@ -71,7 +80,7 @@ Apple constraints confirmed in this pass:
 
 ### Changes made from this pass (0.3.6)
 
-- **Shortcut action.** One 22-second budget covers the whole action, scan included. With the app open, it queues and returns without pausing the foreground uploads; it used to suspend them until the next activation. It does not start while a background window is running. It no longer requires the Automatic Backup switch, so a schedule of the user's choosing can replace it.
+- **Shortcut action.** The action targets a 22-second budget, checked between preparation phases and while waiting for uploads. A synchronous PhotoKit enumeration or an awaited library refresh can exceed that target; it is not a hard timeout. With the app open, it queues and returns without pausing foreground uploads. It does not start while another processing or Shortcut window is running. It does not require the Automatic Backup switch, so a schedule of the user's choosing can replace it.
 - **Crash-loop guard (issue #13).** Rows that are exporting, hashing, or preflighting are marked in UserDefaults while the app is open or inside a granted window. At relaunch, a marked row goes to the back of the queue. A second death on the same row fails it as non-retryable. Nothing is marked while the app is suspended, so iOS's routine terminations do not count. The hashing loop also drains an autorelease pool per chunk.
 - **Diagnostics.** The event timeline records each decision with its reason. That covers launch conditions, whether the previous session ended unexpectedly, scheduler requests and their errors, and when iOS started and ended each window relative to the request. It also covers run results with their conditions (battery, network, Low Power Mode, lock state), library scan mode, account restore, queue pauses and halts, per-stage failures, iCloud deferrals, and background-transfer delivery summaries. Identical consecutive entries fold together, and routine entries are dropped before warnings and errors. MetricKit crash and exit data, the last 40 runs, and a "What stands out" summary appear in the report.
 
@@ -134,7 +143,7 @@ Use physical iOS 15 and newer phones without an attached debugger. Simulated tas
 
 Run a multi-day trial that takes new photos without opening the app. Include a stationary phone overnight, arrival-home events, lock/unlock, ordinary system termination, explicit force-quit followed by reopening, reboot/first unlock, Wi-Fi loss, cellular-policy changes, Low Power Mode and Background App Refresh off.
 
-Exercise local photos, iCloud-only originals, large videos, low disk space, expired authorization/upload URLs, server errors, crash after PUT before commit and crash after server commit before local confirmation. Keep the current still-image-only Live Photo scope visible; resource-complete backup is separate work.
+Exercise local photos, iCloud-only originals, large videos, low disk space, expired authorization/upload URLs, server errors, crash after PUT before commit and crash after server commit before local confirmation. Include interrupted Live Photo still/motion pairs and edited-photo base uploads with each relevant preference enabled.
 
 Measure discovery latency separately from preparation, transfer and finalization latency. Report actual Google confirmations, missed items, duplicated items and battery impact. Treat periods with no granted execution opportunity distinctly from engine failures. A useful target is recovery without missing or falsely completed items whenever execution becomes available; observed overnight completion is evidence, not an OS guarantee.
 

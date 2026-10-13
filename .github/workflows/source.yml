@@ -40,8 +40,8 @@ jobs:
           REPO: ${{ steps.src.outputs.repo }}
         run: |
           # The default token is scoped to this repository. When the workflow
-          # runs in a fork it still reads a public upstream fine, but an
-          # unauthenticated fallback keeps it working if the token is refused.
+          # runs in a fork it reads that fork's releases; an unauthenticated
+          # fallback keeps public release reads working if the token is refused.
           code=$(curl -sL -o release.json -w '%{http_code}' \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
