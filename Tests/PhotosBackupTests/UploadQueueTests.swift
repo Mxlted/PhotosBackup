@@ -435,13 +435,16 @@ final class UploadQueueTests: XCTestCase {
         await settle(queue) { queue.items.isEmpty }
     }
 
-    func testURLSessionRelaunchOnlyPumpsCheckpointedTransfers() async {
+    func testURLSessionRelaunchOnlyPumpsCheckpointedTransfers() async throws {
+        let stagedFile = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data([1]).write(to: stagedFile)
+        defer { try? FileManager.default.removeItem(at: stagedFile) }
         let prepared = PreparedUpload(
             uploadURL: URL(string: "https://example.com/upload")!, hash: Data(repeating: 3, count: 20),
             filename: "ready.jpg", modified: Date(), byteCount: 10,
             receipt: Data([1, 0])
         )
-        let checkpoint = UploadCheckpoint(filePath: "/tmp/ready.jpg", filename: "ready.jpg",
+        let checkpoint = UploadCheckpoint(filePath: stagedFile.path, filename: "ready.jpg",
                                           modified: Date(), byteCount: 10, temporary: true,
                                           prepared: prepared, continuesAfterProcessExit: true)
         let normalID = UUID()

@@ -9,6 +9,8 @@ struct UploadOptions: Equatable, Sendable {
     /// Background processing must never spend its short CPU window downloading
     /// a cloud-only PhotoKit resource. Foreground work may opt back in.
     var allowsICloudDownload = true
+    /// Picker-only copies cannot establish originals or paired-motion requirements.
+    var requiresVariantMetadata = false
 }
 
 /// One row of the activity list.
@@ -109,6 +111,8 @@ private extension MediaSource {
         case .picked: return nil
         case .livePhotoMotion(let identifier): return UploadQueue.motionKeyPrefix + identifier
         case .editBase(let identifier): return UploadQueue.editBaseKeyPrefix + identifier
+        case .original(let identifier): return "original:" + identifier
+        case .originalMotion(let identifier): return "originalmotion:" + identifier
         }
     }
 
@@ -118,6 +122,7 @@ private extension MediaSource {
     }
 
     var isLivePhotoMotion: Bool {
+        if case .originalMotion = self { return true }
         if case .livePhotoMotion = self { return true }
         return false
     }
@@ -154,6 +159,10 @@ final class UploadQueue: ObservableObject {
     @Published private(set) var items: [UploadItem] = []
     /// Non-nil when the queue stopped itself because the account needs attention.
     @Published private(set) var haltReason: String?
+    @Published private(set) var attentionProblem: BackupNotificationMessage.Kind?
+    @Published private(set) var admissionPauseReason: String?
+    @Published private(set) var admissionStatusReason: String?
+    private var admissionMonitor: BackupAdmissionMonitor?
     /// Non-nil while the selected connection policy does not permit uploads.
     @Published private(set) var networkPauseReason: String?
     /// Set when iOS ends a background execution window before the queue drains.
@@ -210,6 +219,17 @@ final class UploadQueue: ObservableObject {
     /// The durable per-account set of sources known to be backed up. Published
     /// because the dashboard's "Backed up" metric is derived from its count.
     @Published private(set) var completedSourceKeys: Set<String> = []
+    @Published private(set) var backupSession: BackupSession?
+    @Published private(set) var remoteConfirmations: [String: Date] = [:]
+    var activeAccountScope: String? { accountIdentifier.map(BackupSession.accountScope) }
+    private var discoveryOwners: Set<UUID> = []
+    private var scopedDiscoveryOwners: Set<UUID> = []
+    private var completedScopeInBatch = false
+    private var discoveryFailed = false
+    var isDiscovering: Bool { !discoveryOwners.isEmpty }
+    var onSessionChange: ((BackupSession) -> Void)?
+    private var lastRecordedSession: BackupSession?
+
     private var completionLedgerHealthy = true
     private var completionLedgerOverrides: [String: [String]] = [:]
     /// Same reasoning as `isUserPaused`: this narrows what `pump` may start.
@@ -257,6 +277,7 @@ final class UploadQueue: ObservableObject {
     private var counts = RowCounts()
     /// Row offset by id, so the event path does not scan for its own row.
     private var indexByID: [UUID: Int] = [:]
+    private var indexBySourceKey: [String: Int] = [:]
     /// Dedup keys for every row `items` currently holds, whatever its state, so
     /// an automatic rescan does not rebuild that set from the whole queue.
     private var queuedSourceKeys: Set<String> = []
@@ -300,6 +321,7 @@ final class UploadQueue: ObservableObject {
         indexByID.reserveCapacity(items.count + rows.count)
         for (offset, row) in rows.enumerated() {
             indexByID[row.id] = items.count + offset
+            if let key = row.source.queueDeduplicationKey { indexBySourceKey[key] = items.count + offset }
             if let key = row.source.queueDeduplicationKey { queuedSourceKeys.insert(key) }
             tally(row.state, by: 1)
         }
@@ -313,12 +335,14 @@ final class UploadQueue: ObservableObject {
     private func rebuildDerivedState() {
         counts = RowCounts()
         indexByID.removeAll(keepingCapacity: true)
+        indexBySourceKey.removeAll(keepingCapacity: true)
         queuedSourceKeys.removeAll(keepingCapacity: true)
         fractionalIDs.removeAll(keepingCapacity: true)
         scanCursor = 0
         indexByID.reserveCapacity(items.count)
         for (offset, item) in items.enumerated() {
             indexByID[item.id] = offset
+            if let key = item.source.queueDeduplicationKey { indexBySourceKey[key] = offset }
             if let key = item.source.queueDeduplicationKey { queuedSourceKeys.insert(key) }
             tally(item.state, by: 1)
             if !item.state.isFinished, item.state.fraction != nil { fractionalIDs.insert(item.id) }
@@ -365,6 +389,7 @@ final class UploadQueue: ObservableObject {
             ?? networkPauseReason
             ?? systemPauseReason
             ?? rateLimitPauseReason
+            ?? admissionPauseReason
     }
     var retainedStagingURLs: Set<URL> { Set(items.compactMap { $0.checkpoint?.fileURL }) }
     var retainedTransferIDs: Set<UUID> {
@@ -425,6 +450,7 @@ final class UploadQueue: ObservableObject {
         // `queuedSourceKeys` tracks the rows already present, so this no longer
         // rebuilds a key set over the whole queue every time a scan window runs.
         var acceptedKeys: Set<String> = []
+        var consideredIDs: Set<UUID> = []
         for source in sources {
             if let limit, accepted.count >= max(0, limit) {
                 reachedLimit = true
@@ -432,6 +458,8 @@ final class UploadQueue: ObservableObject {
             }
             if skippingExisting {
                 if let key = source.queueDeduplicationKey {
+                    if let existing = indexBySourceKey[key], items[existing].state != .done,
+                       items[existing].state != .alreadyBackedUp { consideredIDs.insert(items[existing].id) }
                     guard !completedSourceKeys.contains(key), !queuedSourceKeys.contains(key),
                           acceptedKeys.insert(key).inserted else { continue }
                 } else {
@@ -441,6 +469,9 @@ final class UploadQueue: ObservableObject {
             }
             accepted.append(UploadItem(source: source))
         }
+        if !accepted.isEmpty { ensureSession() }
+        backupSession?.itemIDs.formUnion(accepted.map(\.id))
+        backupSession?.itemIDs.formUnion(consideredIDs)
         appendRows(accepted)
         persistNow()
         pump()
@@ -479,6 +510,11 @@ final class UploadQueue: ObservableObject {
     /// file that is itself thousands of rows long — all on the main actor,
     /// which locked the UI up for as long as it took. One pass, one write.
     func cancelAll() {
+        discoveryOwners.removeAll()
+        scopedDiscoveryOwners.removeAll()
+        completedScopeInBatch = false
+        discoveryFailed = true
+        backupSession?.wasStopped = true
         isUserPaused = false
         var cancelledInFlight = false
         for index in items.indices where !items[index].state.isFinished {
@@ -593,7 +629,25 @@ final class UploadQueue: ObservableObject {
         return released
     }
 
+    @discardableResult
+    func retrySelectedFailed(_ ids: Set<UUID>) -> Int {
+        var count = 0
+        for id in ids {
+            guard let index = index(of: id), running[id] == nil,
+                  case .failed = items[index].state else { continue }
+            requeue(at: index)
+            count += 1
+        }
+        if count > 0 { persistNow(); pump() }
+        return count
+    }
+
     private func requeue(at index: Int) {
+        ensureSession()
+        backupSession?.itemIDs.insert(items[index].id)
+        let asset = sessionAssetKey(items[index])
+        backupSession?.failedAssets.remove(asset)
+        backupSession?.stoppedAssets.remove(asset)
         items[index].attempts = 0
         // A retry the user asked for gets a fresh allowance from the crash guard.
         items[index].interruptedPreparations = 0
@@ -622,6 +676,7 @@ final class UploadQueue: ObservableObject {
     var completedSourceCount: Int {
         completedSourceKeys.count - completedSourceKeys.lazy.filter {
             $0.hasPrefix(Self.motionKeyPrefix) || $0.hasPrefix(Self.editBaseKeyPrefix)
+                || $0.hasPrefix("original:") || $0.hasPrefix("originalmotion:")
         }.count
     }
 
@@ -658,6 +713,7 @@ final class UploadQueue: ObservableObject {
         let keys = Self.relatedKeys(for: sources).intersection(completedSourceKeys)
         guard !keys.isEmpty else { return 0 }
         completedSourceKeys.subtract(keys)
+        remoteConfirmations = remoteConfirmations.filter { !keys.contains($0.key) }
         items.removeAll { item in
             guard item.state.isFinished,
                   let key = item.source.queueDeduplicationKey else { return false }
@@ -749,12 +805,20 @@ final class UploadQueue: ObservableObject {
             for index in items.indices { cleanCheckpoint(for: index) }
             for task in running.values { task.cancel() }
         }
+        discoveryOwners.removeAll()
+        scopedDiscoveryOwners.removeAll()
+        completedScopeInBatch = false
+        discoveryFailed = false
+        backupSession = nil
+        lastRecordedSession = nil
+        remoteConfirmations = [:]
         accountIdentifier = normalized
         items = []
         rebuildDerivedState()
         completedSourceKeys = []
         completionLedgerHealthy = true
         haltReason = nil
+        attentionProblem = nil
         endRateLimitPause()
         isUserPaused = false
         persistenceWarning = nil
@@ -782,9 +846,19 @@ final class UploadQueue: ObservableObject {
                 return
             }
             isUserPaused = snapshot.isUserPaused ?? false
+            backupSession = snapshot.backupSession
+            remoteConfirmations = snapshot.remoteConfirmations ?? [:]
+            // An interrupted discovery never acquires completion on relaunch.
+            if backupSession?.outcome == .scanning { backupSession?.scanComplete = false }
+
             items = snapshot.items.compactMap { stored in
                 if let key = stored.mediaSource.queueDeduplicationKey,
-                   completedSourceKeys.contains(key) { return nil }
+                   completedSourceKeys.contains(key) {
+                    // The completion ledger can outlive a killed snapshot write.
+                    // Do not invent uploaded/duplicate/byte results that were lost.
+                    backupSession?.hasUnmeasuredOutcomes = true
+                    return nil
+                }
                 var item = UploadItem(id: stored.id, source: stored.mediaSource, name: stored.name)
                 item.byteCount = stored.byteCount
                 item.attempts = stored.attempts
@@ -800,6 +874,7 @@ final class UploadQueue: ObservableObject {
                 return item
             }
             rebuildDerivedState()
+            backupSession?.itemIDs.formUnion(items.filter { !$0.state.isFinished }.map(\.id))
             if persistence.storesCompletionLedgerSeparately,
                !snapshot.completedSourceKeys.isEmpty || completionLedgerOverrides[normalized] != nil {
                 persistNow()
@@ -811,6 +886,7 @@ final class UploadQueue: ObservableObject {
             )
             let interrupted = takePreparationMarkers()
             if !interrupted.isEmpty { noteInterruptedPreparations(interrupted) }
+            persistNow()
             pump()
         } catch {
             persistenceWarning = "The saved upload queue could not be restored: \(error.localizedDescription)"
@@ -863,6 +939,8 @@ final class UploadQueue: ObservableObject {
     func resume() {
         if haltReason != nil { DiagnosticEventLog.shared.record("queue", "Resumed the stopped queue") }
         haltReason = nil
+        attentionProblem = nil
+        persistNow()
         pump()
     }
 
@@ -965,7 +1043,7 @@ final class UploadQueue: ObservableObject {
             if Task.isCancelled { return false }
             if let deadline, Date() >= deadline { return false }
             if haltReason != nil || networkPauseReason != nil || systemPauseReason != nil { return false }
-            if isUserPaused && running.isEmpty { return false }
+            if (isUserPaused || admissionPauseReason != nil) && running.isEmpty { return false }
             if running.isEmpty && !hasWorkableItems {
                 return haltReason == nil
             }
@@ -1003,12 +1081,88 @@ final class UploadQueue: ObservableObject {
         }
     }
 
+    // MARK: - Logical session boundaries
+
+    private func ensureSession(scanComplete: Bool = true) {
+        if backupSession == nil || backupSession?.outcome.isComplete == true || backupSession?.outcome == .stopped {
+            backupSession = BackupSession(scanComplete: scanComplete)
+            backupSession?.itemIDs = Set(items.filter { !$0.state.isFinished }.map(\.id))
+        }
+    }
+
+    @discardableResult
+    func beginDiscovery(requiresCompleteScope: Bool = true) -> UUID {
+        ensureSession(scanComplete: false)
+        if discoveryOwners.isEmpty { discoveryFailed = false; completedScopeInBatch = false }
+        if requiresCompleteScope {
+            backupSession?.scopeScanOutstanding = true
+            backupSession?.unavailableAssets = []
+        }
+        backupSession?.scanComplete = false
+        let id = UUID()
+        discoveryOwners.insert(id)
+        if requiresCompleteScope { scopedDiscoveryOwners.insert(id) }
+        persistNow()
+        return id
+    }
+
+    func ownsDiscovery(_ owner: UUID) -> Bool { discoveryOwners.contains(owner) }
+
+    func endDiscovery(_ owner: UUID, complete: Bool) {
+        guard discoveryOwners.remove(owner) != nil else { return }
+        if scopedDiscoveryOwners.remove(owner) != nil && complete { completedScopeInBatch = true }
+        if !complete { discoveryFailed = true }
+        if discoveryOwners.isEmpty {
+            if completedScopeInBatch && !discoveryFailed { backupSession?.scopeScanOutstanding = false }
+            backupSession?.scanComplete = !discoveryFailed && backupSession?.scopeScanOutstanding != true
+        }
+        persistNow()
+    }
+
+    func invalidateSessionScope() {
+        guard backupSession?.outcome.isComplete != true else { return }
+        backupSession?.scanComplete = false
+        backupSession?.scopeScanOutstanding = true
+        persistNow()
+    }
+
+    private func sessionAssetKey(_ item: UploadItem) -> String {
+        item.source.assetIdentifier.map { "asset:" + $0 }
+            ?? item.source.queueDeduplicationKey ?? item.id.uuidString
+    }
+
+    private func refreshBackupSession() { persistNow() }
+
+    private func updatedBackupSession(durable: Bool = true) -> BackupSession? {
+        guard var session = backupSession else { return nil }
+        guard !durable || !session.outcome.isComplete || activeCount > 0 || isDiscovering else { return session }
+        let members = items.filter { session.itemIDs.contains($0.id) }
+        let failed = Set(members.filter { if case .failed = $0.state { return true }; return false }.map(sessionAssetKey))
+        let deferred = Set(members.filter { $0.state == .waitingForICloud }.map(sessionAssetKey))
+        let cancelled = Set(members.filter { $0.state == .cancelled }.map(sessionAssetKey))
+        session.evaluate(discovering: isDiscovering, pending: members.filter { !$0.state.isFinished }.count, failed: failed, deferred: deferred,
+                         cancelled: cancelled, paused: pauseReason != nil, halted: haltReason != nil,
+                         durable: durable, now: Date())
+        return session
+    }
+
+    private func publishSession(_ session: BackupSession?) {
+        guard let session else { return }
+        if backupSession != session { backupSession = session }
+        if lastRecordedSession != session, let scope = activeAccountScope {
+            lastRecordedSession = session
+            AutomaticBackupRunHistory.recordSession(session, accountScope: scope)
+            onSessionChange?(session)
+        }
+    }
+
     // MARK: - Scheduling
 
     private func pump() {
         guard haltReason == nil, networkPauseReason == nil, systemPauseReason == nil,
               rateLimitPauseReason == nil else { return }
-        while running.count < maxConcurrent, let index = nextStartableIndex() {
+        let limit = min(maxConcurrent, admissionMonitor?.decision.concurrencyLimit ?? maxConcurrent)
+        while running.count < limit, let index = nextStartableIndex() {
             start(at: index)
         }
     }
@@ -1020,15 +1174,68 @@ final class UploadQueue: ObservableObject {
     /// the cost landed on the main actor between every pair of uploads.
     private func nextStartableIndex() -> Int? {
         while scanCursor < items.count {
-            if items[scanCursor].state == .queued {
-                // A pause still lets a row whose bytes are already moving in an
-                // iOS-owned background transfer come back to collect its result.
-                guard drainsBackgroundCompletionsOnly || isUserPaused else { return scanCursor }
-                if items[scanCursor].checkpoint?.isBackgroundTransfer == true { return scanCursor }
+            let item = items[scanCursor]
+            if item.state == .queued {
+                let prerequisite: String? = {
+                    switch item.source {
+                    case .livePhotoMotion(let id): return "asset:" + id
+                    case .originalMotion(let id): return "original:" + id
+                    default: return nil
+                    }
+                }()
+                if let prerequisite, !completedSourceKeys.contains(prerequisite),
+                   let baseIndex = indexBySourceKey[prerequisite] {
+                    switch items[baseIndex].state {
+                    case .failed:
+                        setState(.failed(reason: "The required still image has not completed. Retry both components.", retryable: true), at: scanCursor)
+                        persist()
+                    case .cancelled: setState(.cancelled, at: scanCursor); persist()
+                    case .waitingForICloud: setState(.waitingForICloud, at: scanCursor); persist()
+                    default: break
+                    }
+                    scanCursor += 1
+                    continue
+                }
+                let ownsFile = item.checkpoint.map { FileManager.default.fileExists(atPath: $0.filePath) } ?? false
+                if drainsBackgroundCompletionsOnly || isUserPaused {
+                    if ownsFile && item.checkpoint?.isBackgroundTransfer == true { return scanCursor }
+                } else {
+                    if ownsFile { return scanCursor }
+                    if admissionMonitor?.reservePreparation(id: item.id,
+                        estimatedBytes: item.byteCount > 0 ? item.byteCount : nil) ?? true { return scanCursor }
+                }
             }
             scanCursor += 1
         }
         return nil
+    }
+
+    func installAdmissionMonitor(_ monitor: BackupAdmissionMonitor) {
+        admissionMonitor = monitor
+        monitor.onDecisionChange = { [weak self] decision in
+            self?.admissionDecisionChanged(decision)
+        }
+        admissionDecisionChanged(monitor.decision)
+    }
+
+    private func admissionDecisionChanged(_ decision: BackupAdmissionDecision) {
+        admissionPauseReason = decision.allowsNewPreparation ? nil : decision.reason
+        admissionStatusReason = decision.reason
+        scanCursor = 0
+        refreshBackupSession()
+        pump()
+    }
+
+    private func wakeDependentMotion(for source: MediaSource) {
+        let key: String
+        switch source {
+        case .asset(let id): key = "motion:" + id
+        case .original(let id): key = "originalmotion:" + id
+        default: return
+        }
+        if let index = indexBySourceKey[key], items[index].state == .queued {
+            scanCursor = min(scanCursor, index)
+        }
     }
 
     private func start(at index: Int) {
@@ -1069,6 +1276,7 @@ final class UploadQueue: ObservableObject {
             setState(state, at: index)
         case .checkpoint(let checkpoint):
             items[index].checkpoint = checkpoint
+            if checkpoint != nil { admissionMonitor?.releaseReservation(id: id) }
             if checkpoint?.prepared != nil { clearPreparationMarker(id) }
             // The durable hand-off to the background transfer: this must be on
             // disk before the worker proceeds, not on the next turn.
@@ -1078,8 +1286,12 @@ final class UploadQueue: ObservableObject {
 
     private func finish(_ id: UUID, _ outcome: Result<UploadOutcome, Error>) {
         running[id] = nil
+        admissionMonitor?.releaseReservation(id: id)
         clearPreparationMarker(id)
-        defer { pump() }
+        defer {
+            if let index = index(of: id) { wakeDependentMotion(for: items[index].source) }
+            refreshBackupSession(); pump()
+        }
         guard let index = index(of: id) else { return }
         switch outcome {
         case .success(let result):
@@ -1089,6 +1301,16 @@ final class UploadQueue: ObservableObject {
             if let key = items[index].source.queueDeduplicationKey { completedSourceKeys.insert(key) }
             rateLimitDelay = Self.rateLimitBaseDelay
             items[index].checkpoint = nil
+            if let key = items[index].source.queueDeduplicationKey {
+                if !result.mediaKey.isEmpty { remoteConfirmations[key] = Date() }
+            }
+            let item = items[index]
+            let componentKey = (item.source.queueDeduplicationKey ?? "picked") + ":" + item.id.uuidString
+            if !result.mediaKey.isEmpty {
+                backupSession?.components[componentKey] = .init(asset: sessionAssetKey(item),
+                    uploaded: settled == .done, bytes: item.byteCount > 0 ? item.byteCount : nil)
+            }
+            backupSession?.failedAssets.remove(sessionAssetKey(item))
             recordCompletion(for: items[index])
             persist()
             if let followUps = followUpSources?(items[index].source), !followUps.isEmpty {
@@ -1147,6 +1369,8 @@ final class UploadQueue: ObservableObject {
                 return
             }
             if error as? MediaExporter.Failure == .missingAsset {
+                backupSession?.unavailableAssets.insert(sessionAssetKey(items[index]))
+                backupSession?.scanComplete = false
                 // Deleted from the photo library while it waited — which is what
                 // freeing space on the iPhone does to rows still queued for the
                 // same photos. Nothing is left to back up and nothing needs the
@@ -1212,6 +1436,7 @@ final class UploadQueue: ObservableObject {
     private func halt(_ error: GPMCError) {
         guard haltReason == nil else { return }
         haltReason = error.message
+        attentionProblem = error.kind == .storageFull ? .remoteStorage : .account
         recordFailure(name: "Backup stopped", reason: error.message, status: error.status)
         DiagnosticEventLog.shared.record(
             "queue",
@@ -1335,12 +1560,16 @@ final class UploadQueue: ObservableObject {
     /// runs as the process is about to be suspended.
     private func persistNow() {
         persistScheduled = false
-        guard let accountIdentifier, let persistence else { return }
+        let candidateSession = updatedBackupSession(durable: completionLedgerHealthy)
+        guard let accountIdentifier, let persistence else { publishSession(candidateSession); return }
         let storedItems = items.compactMap { item -> PersistedUploadItem? in
             guard let source = PersistedMediaSource(item.source)
                     ?? item.checkpoint.map({ .file($0.filePath) }) else { return nil }
             let interruptions = item.interruptedPreparations > 0 ? item.interruptedPreparations : nil
             let motion: Bool? = item.source.isLivePhotoMotion ? true : nil
+            let original: Bool? = {
+                switch item.source { case .original, .originalMotion: return true; default: return nil }
+            }()
             let editBase: Bool? = item.source.isEditBase ? true : nil
             switch item.state {
             case .alreadyBackedUp, .done:
@@ -1351,20 +1580,20 @@ final class UploadQueue: ObservableObject {
                 return PersistedUploadItem(id: item.id, source: source, name: item.name,
                                            byteCount: item.byteCount, attempts: item.attempts,
                                            failureReason: nil, failureRetryable: false,
-                                           checkpoint: nil, cancelled: true, motion: motion, editBase: editBase)
+                                           checkpoint: nil, cancelled: true, motion: motion, editBase: editBase, original: original)
             case .failed(let reason, let retryable):
                 return PersistedUploadItem(id: item.id, source: source, name: item.name,
                                            byteCount: item.byteCount, attempts: item.attempts,
                                            failureReason: reason, failureRetryable: retryable,
                                            checkpoint: item.checkpoint,
-                                           interruptedPreparations: interruptions, motion: motion, editBase: editBase)
+                                           interruptedPreparations: interruptions, motion: motion, editBase: editBase, original: original)
             default:
                 // Working and retry-delay states intentionally restore queued.
                 return PersistedUploadItem(id: item.id, source: source, name: item.name,
                                            byteCount: item.byteCount, attempts: item.attempts,
                                            failureReason: nil, failureRetryable: false,
                                            checkpoint: item.checkpoint,
-                                           interruptedPreparations: interruptions, motion: motion, editBase: editBase)
+                                           interruptedPreparations: interruptions, motion: motion, editBase: editBase, original: original)
             }
         }
         if completionLedgerHealthy {
@@ -1379,12 +1608,15 @@ final class UploadQueue: ObservableObject {
             completedSourceKeys: persistence.storesCompletionLedgerSeparately && completionLedgerHealthy
                 ? [] : Array(completedSourceKeys),
             isUserPaused: isUserPaused,
-            completionLedgerOverrides: completionLedgerOverrides.isEmpty ? nil : completionLedgerOverrides
+            completionLedgerOverrides: completionLedgerOverrides.isEmpty ? nil : completionLedgerOverrides,
+            backupSession: candidateSession, remoteConfirmations: remoteConfirmations
         )
         do {
             try persistence.save(snapshot)
             if completionLedgerHealthy { persistenceWarning = nil }
+            publishSession(candidateSession)
         } catch {
+            publishSession(updatedBackupSession(durable: false))
             persistenceWarning = "Upload progress could not be saved: \(error.localizedDescription)"
             DiagnosticEventLog.shared.record(
                 "persistence",

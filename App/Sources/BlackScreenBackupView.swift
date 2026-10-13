@@ -98,6 +98,7 @@ struct BlackScreenBackupView: View {
     @StateObject private var awakeSession = BlackScreenAwakeSession()
     @State private var isVisible = false
     @State private var showingDetails = false
+    @State private var completionPolicy = BlackScreenCompletionPolicy()
     @ScaledMetric(relativeTo: .caption) private var statisticsWidth: CGFloat = 210
 
     private let textColor = Color(white: 0.55)
@@ -122,6 +123,12 @@ struct BlackScreenBackupView: View {
         .interactiveDismissDisabled()
         .onAppear {
             isVisible = true
+            updateAwakeSession()
+        }
+        .onChange(of: queue.backupSession) { _ in updateAwakeSession() }
+        .onChange(of: preferences.restoreAutoLockAfterBackup) { _ in updateAwakeSession() }
+        .onChange(of: queue.activeAccountScope) { _ in
+            completionPolicy.resetForAccountChange()
             updateAwakeSession()
         }
         .onChange(of: scenePhase) { _ in updateAwakeSession() }
@@ -176,6 +183,10 @@ struct BlackScreenBackupView: View {
             VStack(spacing: 28) {
                 statusSummary
                 metrics
+                if let session = queue.backupSession {
+                    BackupSessionSummaryView(session: session).multilineTextAlignment(.leading)
+                }
+                if let reason = queue.admissionStatusReason { Text(reason).font(.footnote) }
 
                 if queue.activeCount > 0 {
                     Text("Current queue: \(queue.overallFraction.formatted(.percent.precision(.fractionLength(0))))")
@@ -200,7 +211,9 @@ struct BlackScreenBackupView: View {
                 .multilineTextAlignment(.leading)
 
                 VStack(spacing: 12) {
-                    Text("App stays awake until you exit this mode.\nKeep Photos Backup open and your phone unlocked.")
+                    Text(preferences.restoreAutoLockAfterBackup
+                         ? "Normal auto-lock resumes after this session settles. Incomplete scans and pauses keep the app awake."
+                         : "App stays awake until you exit this mode.\nKeep Photos Backup open and your phone unlocked.")
                         .font(.footnote)
                         .foregroundStyle(secondaryTextColor)
                     Button { showingDetails = false } label: {
@@ -282,7 +295,9 @@ struct BlackScreenBackupView: View {
     }
 
     private func updateAwakeSession() {
-        awakeSession.update(isVisible: isVisible, isActive: scenePhase == .active)
+        completionPolicy.update(session: queue.backupSession, hasNewWork: queue.activeCount > 0 || queue.isDiscovering)
+        awakeSession.update(isVisible: isVisible,
+                            isActive: scenePhase == .active && !(preferences.restoreAutoLockAfterBackup && completionPolicy.shouldRestoreAutoLock))
     }
 }
 
@@ -335,5 +350,27 @@ private struct BackupSessionTipsView: View {
             Text(detail).font(.subheadline).foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// New work reacquires the display override. A terminal session from before
+/// entering the mode is not treated as a new completion signal.
+struct BlackScreenCompletionPolicy: Equatable {
+    private(set) var observedSession: UUID?
+    private(set) var shouldRestoreAutoLock = false
+    private var observedActive = false
+    mutating func update(session: BackupSession?, hasNewWork: Bool) {
+        guard let session else { return }
+        if observedSession != session.id {
+            observedSession = session.id
+            shouldRestoreAutoLock = false
+            observedActive = !session.outcome.isComplete
+        }
+        if !session.outcome.isComplete { observedActive = true }
+        if hasNewWork { shouldRestoreAutoLock = false }
+        else if observedActive && session.outcome.isComplete { shouldRestoreAutoLock = true }
+    }
+    mutating func resetForAccountChange() {
+        observedSession = nil; shouldRestoreAutoLock = false; observedActive = false
     }
 }

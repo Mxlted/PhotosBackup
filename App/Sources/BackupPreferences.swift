@@ -46,10 +46,26 @@ final class BackupPreferences: ObservableObject {
     @Published var backUpLivePhotoMotion: Bool { didSet { defaults.set(backUpLivePhotoMotion, forKey: Key.backUpLivePhotoMotion) } }
     @Published var showBlackScreenStatus: Bool { didSet { defaults.set(showBlackScreenStatus, forKey: Key.showBlackScreenStatus) } }
 
+    @Published var backUpOriginals: Bool { didSet { defaults.set(backUpOriginals, forKey: "backup.originals") } }
+    @Published var restoreAutoLockAfterBackup: Bool { didSet { defaults.set(restoreAutoLockAfterBackup, forKey: "backup.restoreAutoLock") } }
+    @Published var backupNotifications: Bool { didSet { defaults.set(backupNotifications, forKey: "backup.notifications") } }
+    @Published var selectionRules: BackupSelectionRules { didSet { save(selectionRules, key: "backup.selectionRules.v1") } }
+    @Published var admissionSettings: BackupAdmissionSettings { didSet { save(admissionSettings, key: "backup.admission.v1") } }
+
+    private func save<T: Encodable>(_ value: T, key: String) {
+        if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: key) }
+    }
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        backUpOriginals = defaults.bool(forKey: "backup.originals")
+        restoreAutoLockAfterBackup = defaults.bool(forKey: "backup.restoreAutoLock")
+        backupNotifications = defaults.bool(forKey: "backup.notifications")
+        selectionRules = defaults.data(forKey: "backup.selectionRules.v1")
+            .flatMap { try? JSONDecoder().decode(BackupSelectionRules.self, from: $0) } ?? .init()
+        admissionSettings = defaults.data(forKey: "backup.admission.v1")
+            .flatMap { try? JSONDecoder().decode(BackupAdmissionSettings.self, from: $0) } ?? .init()
         selectedAlbumIDs = Set(defaults.stringArray(forKey: Key.selectedAlbumIDs) ?? [])
         automaticBackup = defaults.object(forKey: Key.automaticBackup) as? Bool ?? true
         connection = BackupConnection(rawValue: defaults.string(forKey: Key.connection) ?? "") ?? .wifiOnly

@@ -28,6 +28,11 @@ enum MediaSource: Equatable, Sendable {
     /// this version (seen on device on 2026-09-19); the finished edit and the
     /// original do not count.
     case editBase(localIdentifier: String)
+    /// Unedited still or standalone video, independently remembered from the
+    /// current appearance. Never substitutes a rendered resource.
+    case original(localIdentifier: String)
+    /// Unedited Live Photo motion, attached to the unedited still's hash.
+    case originalMotion(localIdentifier: String)
 }
 
 /// A picked item with no resolvable asset id. Wraps the provider so the file
@@ -62,6 +67,9 @@ actor MediaExporter {
         case liveOnly
         case noMotion
         case noEditBase
+        case noOriginal
+        case noOriginalMotion
+        case noRenderedEdit
         case iCloudDownloadRequired
         var errorDescription: String? {
             switch self {
@@ -70,6 +78,9 @@ actor MediaExporter {
             case .liveOnly: return "That item has no still photo or standalone video to upload."
             case .noMotion: return "That Live Photo has no motion to back up."
             case .noEditBase: return "That photo has no Google Photos edit to back up the base of."
+            case .noOriginal: return "Photos could not provide this item's unedited original. Its original backup is incomplete."
+            case .noOriginalMotion: return "Photos could not provide the original Live Photo motion. Its original backup is incomplete."
+            case .noRenderedEdit: return "Photos could not provide the current rendered edit. Keep the app open and retry after Photos has finished preparing the edit."
             case .iCloudDownloadRequired: return "That item is only in iCloud. It will continue when the app is open."
             case .unreadable(let detail): return "Could not read that item: \(detail)"
             }
@@ -161,6 +172,10 @@ actor MediaExporter {
             return try await exportMotion(identifier, allowsNetworkAccess: allowsNetworkAccess)
         case .editBase(let identifier):
             return try await exportEditBase(identifier, allowsNetworkAccess: allowsNetworkAccess)
+        case .original(let identifier):
+            return try await exportOriginal(identifier, allowsNetworkAccess: allowsNetworkAccess)
+        case .originalMotion(let identifier):
+            return try await exportMotion(identifier, original: true, allowsNetworkAccess: allowsNetworkAccess)
         }
     }
 
@@ -187,8 +202,8 @@ actor MediaExporter {
     /// Live Photo motion is uploaded by a separate follow-up row, so only the
     /// still or the plain video is uploaded here.
     static func uploadResourceTypes(for mediaType: PHAssetMediaType, edited: Bool) -> [PHAssetResourceType] {
-        let photo: [PHAssetResourceType] = edited ? [.fullSizePhoto, .photo] : [.photo, .fullSizePhoto]
-        let video: [PHAssetResourceType] = edited ? [.fullSizeVideo, .video] : [.video, .fullSizeVideo]
+        let photo: [PHAssetResourceType] = edited ? [.fullSizePhoto] : [.photo, .fullSizePhoto]
+        let video: [PHAssetResourceType] = edited ? [.fullSizeVideo] : [.video, .fullSizeVideo]
         switch mediaType {
         case .image: return photo
         case .video: return video
@@ -199,7 +214,30 @@ actor MediaExporter {
     /// The paired video attached as a Live Photo's motion: the rendered edit's
     /// video for an edited asset, as the Google Photos app attaches it.
     static func motionResourceTypes(edited: Bool) -> [PHAssetResourceType] {
-        edited ? [.fullSizePairedVideo, .pairedVideo] : [.pairedVideo]
+        edited ? [.fullSizePairedVideo] : [.pairedVideo]
+    }
+
+    /// Original preservation must fail visibly when the original is absent;
+    /// falling back to FullSize resources would silently record the edit twice.
+    static func originalResourceTypes(for mediaType: PHAssetMediaType) -> [PHAssetResourceType] {
+        switch mediaType {
+        case .image: return [.photo]
+        case .video: return [.video]
+        default: return []
+        }
+    }
+
+    private func exportOriginal(_ identifier: String, allowsNetworkAccess: Bool) async throws -> ExportedMedia {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else {
+            throw Failure.missingAsset
+        }
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = Self.originalResourceTypes(for: asset.mediaType)
+            .compactMap({ type in resources.first { $0.type == type } }).first else {
+            throw Failure.noOriginal
+        }
+        return try await stage(resource, as: resource.originalFilename, of: asset,
+                               allowsNetworkAccess: allowsNetworkAccess)
     }
 
     /// A rendered edit is named `FullSizeRender.heic`. Upload it under the
@@ -220,6 +258,7 @@ actor MediaExporter {
         let resources = PHAssetResource.assetResources(for: asset)
         let preferred = Self.uploadResourceTypes(for: asset.mediaType, edited: asset.hasAdjustments)
         guard let resource = preferred.compactMap({ type in resources.first { $0.type == type } }).first else {
+            if asset.hasAdjustments { throw Failure.noRenderedEdit }
             throw resources.isEmpty ? Failure.noResource : Failure.liveOnly
         }
         let original = resources.first { $0.type == .photo || $0.type == .video }?.originalFilename
@@ -286,17 +325,22 @@ actor MediaExporter {
     /// A Live Photo's paired video, plus the hash of the still it belongs to.
     /// The still is hashed as it streams in rather than staged: only its hash
     /// is needed, to name the item the motion is attached to.
-    private func exportMotion(_ identifier: String, allowsNetworkAccess: Bool) async throws -> ExportedMedia {
+    private func exportMotion(_ identifier: String, original: Bool = false,
+                              allowsNetworkAccess: Bool) async throws -> ExportedMedia {
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else {
             throw Failure.missingAsset
         }
         let resources = PHAssetResource.assetResources(for: asset)
-        let edited = asset.hasAdjustments
+        let edited = !original && asset.hasAdjustments
         func first(_ types: [PHAssetResourceType]) -> PHAssetResource? {
             types.compactMap { type in resources.first { $0.type == type } }.first
         }
-        guard let video = first(Self.motionResourceTypes(edited: edited)) else { throw Failure.noMotion }
-        guard let still = first(Self.uploadResourceTypes(for: .image, edited: edited)) else { throw Failure.noResource }
+        guard let video = first(Self.motionResourceTypes(edited: edited)) else {
+            throw original ? Failure.noOriginalMotion : Failure.noMotion
+        }
+        let stillTypes = original ? Self.originalResourceTypes(for: .image)
+            : Self.uploadResourceTypes(for: .image, edited: edited)
+        guard let still = first(stillTypes) else { throw original ? Failure.noOriginal : Failure.noResource }
         let stillHash = try await Self.sha1(of: still, allowsNetworkAccess: allowsNetworkAccess)
         let original = resources.first { $0.type == .pairedVideo }?.originalFilename
         let filename = Self.uploadFilename(original: original, rendition: video.originalFilename)

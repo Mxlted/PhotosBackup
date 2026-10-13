@@ -73,6 +73,21 @@ struct FolderSelectionView: View {
                 .background((preferences.automaticBackup ? Color.green : Color.orange).opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
                 .padding(.bottom, 4)
 
+                NavigationLink(destination: BackupRulesView()) {
+                    HStack {
+                        Image(systemName: "line.3.horizontal.decrease.circle")
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Backup Rules").font(.subheadline.weight(.semibold))
+                            Text(preferences.selectionRules.summary).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(14)
+                    .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+
                 ForEach(filteredAlbums) { album in
                     AlbumSelectionRow(album: album,
                                       isSelected: preferences.selectedAlbumIDs.contains(album.id),

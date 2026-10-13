@@ -15,6 +15,12 @@ struct StorageUsageView: View {
 
             Section("System-managed") {
                 storageRow("Network and web caches", bytes: snapshot?.caches)
+                HStack {
+                    Text("Available for staging")
+                    Spacer()
+                    Text(snapshot?.availableForStaging.map { $0.formatted(.byteCount(style: .file)) } ?? "Unavailable")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section {

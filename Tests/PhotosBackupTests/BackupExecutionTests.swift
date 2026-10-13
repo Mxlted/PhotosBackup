@@ -165,12 +165,15 @@ final class BackupExecutionTests: XCTestCase {
         XCTAssertNotNil(queue.systemPauseReason)
     }
 
-    func testTransferOnlyRestorationStartsPreparedWorkAndLeavesFreshExportsQueued() async {
+    func testTransferOnlyRestorationStartsPreparedWorkAndLeavesFreshExportsQueued() async throws {
+        let stagedFile = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data([1]).write(to: stagedFile)
+        defer { try? FileManager.default.removeItem(at: stagedFile) }
         let prepared = PreparedUpload(uploadURL: URL(string: "https://example.com/upload")!,
                                       hash: Data(repeating: 1, count: 20), filename: "fixture.jpg",
                                       modified: Date(timeIntervalSince1970: 1), byteCount: 1,
                                       receipt: Data([1]))
-        let checkpoint = UploadCheckpoint(filePath: "/tmp/execution-fixture.jpg", filename: "fixture.jpg",
+        let checkpoint = UploadCheckpoint(filePath: stagedFile.path, filename: "fixture.jpg",
                                           modified: prepared.modified, byteCount: 1, temporary: true,
                                           prepared: prepared, continuesAfterProcessExit: true)
         let persistence = MemoryUploadQueuePersistence(snapshot: UploadQueueSnapshot(
