@@ -28,6 +28,8 @@ targets:
       - path: GPMC/Core
       - path: App/Resources/Assets.xcassets
         buildPhase: resources
+      - path: App/Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
     settings:
       base:
         INFOPLIST_FILE: App/Resources/Info.plist

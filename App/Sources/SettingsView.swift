@@ -20,6 +20,15 @@ struct SettingsView: View {
             Form {
                 accountSection
                 backupSection
+                Section {
+                    NavigationLink("Unattended Backup") { UnattendedBackupSettingsView(settings: $preferences.admissionSettings) }
+                }
+                BackupNotificationSettingsView()
+                Section("Black Screen Mode") {
+                    Toggle("Restore Auto-Lock After Completion", isOn: $preferences.restoreAutoLockAfterBackup)
+                    Text("Off by default. After a fully scanned session settles, including a finish with failures, normal auto-lock resumes. Pauses and incomplete scans keep the screen awake. This does not lock the device.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 automationSection
                 verifySection
                 supportSection
@@ -133,6 +142,9 @@ struct SettingsView: View {
             Toggle("Storage Saver", isOn: $preferences.storageSaver)
             Toggle("Count Against Storage Quota", isOn: $preferences.useQuota)
             Toggle("Back Up Live Photo Motion", isOn: $preferences.backUpLivePhotoMotion)
+            Toggle("Keep Originals of Edited Media", isOn: $preferences.backUpOriginals)
+            Text("Also uploads the unedited original of edited photos and videos, including previously backed-up items. This may use additional storage. Originals and edits may appear as separate files in Google Photos; no reversible edit history is promised.")
+                .font(.footnote).foregroundStyle(.secondary)
         } header: {
             Text("Backup")
         } footer: {
@@ -193,6 +205,7 @@ struct SettingsView: View {
     private var supportSection: some View {
         Section("Support") {
             NavigationLink("Create Diagnostic Report") { DiagnosticReportView() }
+            NavigationLink("Backup Sessions") { BackupSessionHistoryView() }
             NavigationLink("Storage") { StorageUsageView() }
             NavigationLink("Diagnostics") { DiagnosticsView() }
             Button("Run Onboarding Again") {

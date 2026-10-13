@@ -11,7 +11,8 @@ enum PersistedMediaSource: Codable, Equatable, Sendable {
         // Motion and edit-base rows are stored as their asset plus a flag on
         // `PersistedUploadItem`, so a snapshot stays readable by builds that
         // predate them.
-        case .asset(let identifier), .livePhotoMotion(let identifier), .editBase(let identifier):
+        case .asset(let identifier), .livePhotoMotion(let identifier), .editBase(let identifier),
+             .original(let identifier), .originalMotion(let identifier):
             self = .asset(identifier)
         case .file(let url): self = .file(url.standardizedFileURL.path)
         case .picked: return nil
@@ -68,11 +69,15 @@ struct PersistedUploadItem: Codable, Equatable, Sendable {
     /// True for a Google Photos edit-base row, stored the same way as a motion
     /// row. Never set together with `motion`.
     let editBase: Bool?
+    /// Optional version marker: old snapshots decode without it. Original motion
+    /// uses both `original` and `motion`, retaining the existing asset encoding.
+    let original: Bool?
 
     init(id: UUID, source: PersistedMediaSource, name: String, byteCount: Int64,
          attempts: Int, failureReason: String?, failureRetryable: Bool,
          checkpoint: UploadCheckpoint? = nil, cancelled: Bool? = nil,
-         interruptedPreparations: Int? = nil, motion: Bool? = nil, editBase: Bool? = nil) {
+         interruptedPreparations: Int? = nil, motion: Bool? = nil, editBase: Bool? = nil,
+         original: Bool? = nil) {
         self.id = id
         self.source = source
         self.name = name
@@ -85,10 +90,14 @@ struct PersistedUploadItem: Codable, Equatable, Sendable {
         self.interruptedPreparations = interruptedPreparations
         self.motion = motion
         self.editBase = editBase
+        self.original = original
     }
 
     var mediaSource: MediaSource {
         if case .asset(let identifier) = source {
+            if original == true {
+                return motion == true ? .originalMotion(localIdentifier: identifier) : .original(localIdentifier: identifier)
+            }
             if motion == true { return .livePhotoMotion(localIdentifier: identifier) }
             if editBase == true { return .editBase(localIdentifier: identifier) }
         }
@@ -146,16 +155,21 @@ struct UploadQueueSnapshot: Codable, Equatable, Sendable {
     /// override stale ledger entries, even after switching to another account.
     /// Optional so version-1 snapshots from earlier builds still decode.
     let completionLedgerOverrides: [String: [String]]?
+    let backupSession: BackupSession?
+    let remoteConfirmations: [String: Date]?
 
     init(version: Int, accountIdentifier: String, items: [PersistedUploadItem],
          completedSourceKeys: [String], isUserPaused: Bool? = nil,
-         completionLedgerOverrides: [String: [String]]? = nil) {
+         completionLedgerOverrides: [String: [String]]? = nil,
+         backupSession: BackupSession? = nil, remoteConfirmations: [String: Date]? = nil) {
         self.version = version
         self.accountIdentifier = accountIdentifier
         self.items = items
         self.completedSourceKeys = completedSourceKeys
         self.isUserPaused = isUserPaused
         self.completionLedgerOverrides = completionLedgerOverrides
+        self.backupSession = backupSession
+        self.remoteConfirmations = remoteConfirmations
     }
 
     /// Update both representations in one atomic snapshot save. A crash after
@@ -169,7 +183,9 @@ struct UploadQueueSnapshot: Codable, Equatable, Sendable {
             version: version, accountIdentifier: accountIdentifier, items: items,
             completedSourceKeys: accountIdentifier == identifier
                 ? completedSourceKeys.filter { !keys.contains($0) } : completedSourceKeys,
-            isUserPaused: isUserPaused, completionLedgerOverrides: overrides)
+            isUserPaused: isUserPaused, completionLedgerOverrides: overrides,
+            backupSession: backupSession, remoteConfirmations: accountIdentifier == identifier
+                ? remoteConfirmations?.filter { !keys.contains($0.key) } : remoteConfirmations)
     }
 }
 
@@ -372,7 +388,8 @@ final class MemoryUploadQueuePersistence: UploadQueuePersisting {
                                             items: snapshot.items,
                                             completedSourceKeys: snapshot.completedSourceKeys + [key],
                                             isUserPaused: snapshot.isUserPaused,
-                                            completionLedgerOverrides: snapshot.completionLedgerOverrides)
+                                            completionLedgerOverrides: snapshot.completionLedgerOverrides,
+                                            backupSession: snapshot.backupSession, remoteConfirmations: snapshot.remoteConfirmations)
     }
 
     func removeCompletedSourceKeys(_ keys: Set<String>, for accountIdentifier: String) throws {

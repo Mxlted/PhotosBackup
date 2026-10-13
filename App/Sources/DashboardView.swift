@@ -62,6 +62,22 @@ struct DashboardView: View {
                 LazyVStack(spacing: 16) {
                     accountBanner
                     backupHero
+                    if let health = automaticBackup.health {
+                        NavigationLink {
+                            BackupHealthView(snapshot: health, onScan: { Task { _ = await automaticBackup.backUpSelectedAlbumsNow() } })
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label("Backup Health", systemImage: "heart.text.square") .font(.headline)
+                                Text(health.nextAction).font(.subheadline).foregroundStyle(.secondary)
+                                if health.scope.isLimited { Text("Limited Photos access").font(.caption).foregroundStyle(.orange) }
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(20)
+                             .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 20))
+                        }.buttonStyle(.plain)
+                    }
+                    if let reason = queue.admissionStatusReason {
+                        Label(reason, systemImage: "pause.circle").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    NavigationLink("Backup Session Summary") { BackupSessionHistoryView() }
                     quickActions
                     BlackScreenBackupControls(onStart: onBlackScreen)
                         .padding(20)
@@ -109,7 +125,7 @@ struct DashboardView: View {
     /// anything Google already has.
     private func enqueue(_ sources: [MediaSource]) {
         guard !sources.isEmpty else { return }
-        queue.reverify(sources)
+        Task { await automaticBackup.enqueueManualSelection(sources) }
     }
 
     @ViewBuilder private var accountBanner: some View {

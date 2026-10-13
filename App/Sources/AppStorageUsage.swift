@@ -6,6 +6,7 @@ struct AppStorageSnapshot: Equatable, Sendable {
     let backupRecords: Int64
     let transferResults: Int64
     let caches: Int64
+    var availableForStaging: Int64? = nil
 
     var appManaged: Int64 { stagedUploads + backupRecords + transferResults }
     var total: Int64 { appManaged + caches }
@@ -24,9 +25,28 @@ enum AppStorageUsage {
                 stagedUploads: size(of: MediaExporter.root, excluding: []),
                 backupRecords: size(of: records, excluding: [results]),
                 transferResults: size(of: results, excluding: []),
-                caches: size(of: caches, excluding: [])
+                caches: size(of: caches, excluding: []),
+                availableForStaging: availableCapacityOnCurrentVolume()
             )
         }.value
+    }
+
+    /// Shared by admission control and Storage reporting. The filesystem's
+    /// available bytes already exclude all existing staged upload bodies.
+    static func availableCapacity() async -> Int64? {
+        await Task.detached(priority: .utility) { availableCapacityOnCurrentVolume() }.value
+    }
+
+    private static func availableCapacityOnCurrentVolume() -> Int64? {
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        guard let values = try? root.resourceValues(forKeys: [
+            .volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey
+        ]) else { return nil }
+        let reported = [values.volumeAvailableCapacity.map(Int64.init),
+                        values.volumeAvailableCapacityForImportantUsage].compactMap { $0 }
+        // Prefer the conservative figure if the important-usage estimate also
+        // includes purgeable system data that has not actually been reclaimed.
+        return reported.filter { $0 >= 0 }.min()
     }
 
     /// Removes data that has no durable owner. Pending upload bodies and their

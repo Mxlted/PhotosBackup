@@ -723,16 +723,45 @@ final class GPMCClientTests: XCTestCase {
     /// looked up as a Live Photo motion, resolves to the Live Photo. Nothing is
     /// uploaded when it does.
     func testMotionAlreadyAttachedSettlesWithoutUploading() async throws {
-        StubProtocol.handler = Self.motionHandler(motionKey: "LIVEKEY", stillKey: "STILLKEY")
+        StubProtocol.handler = Self.motionHandler(motionKey: "LIVEKEY", stillKey: "LIVEKEY")
         let file = try scratchFile(name: "IMG_0001.MOV")
         let client = try GPMCClient(authData: Self.credential, session: StubProtocol.session())
         let preparation = try await client.prepareMotionUpload(file: file, filename: "IMG_0001.MOV",
                                                                stillHash: Data(repeating: 1, count: 20)) { _ in }
         XCTAssertEqual(preparation, .alreadyBackedUp(mediaKey: "LIVEKEY"))
         let lookups = StubProtocol.seen.filter { $0.stubPath.hasSuffix("/5084965799730810217") }
-        XCTAssertEqual(lookups.count, 1)
+        XCTAssertEqual(lookups.count, 2)
         XCTAssertTrue(Self.isMotionLookup(try XCTUnwrap(lookups.first)))
         XCTAssertFalse(StubProtocol.seen.contains { $0.stubPath.hasSuffix("/interactive") })
+    }
+
+    func testIdenticalMotionAttachedToAnotherVersionDoesNotCompleteTheRequiredPair() async throws {
+        StubProtocol.handler = Self.motionHandler(motionKey: "CURRENT-VERSION", stillKey: "ORIGINAL-VERSION")
+        let file = try scratchFile(name: "fixture-original-motion.mov")
+        let client = try GPMCClient(authData: Self.credential, session: StubProtocol.session())
+        do {
+            _ = try await client.prepareMotionUpload(file: file, filename: "fixture-original-motion.mov",
+                stillHash: Data(repeating: 1, count: 20)) { _ in }
+            XCTFail("a match for the wrong still must not be treated as backup completion")
+        } catch let error as GPMCError {
+            XCTAssertFalse(error.isRetryable)
+            XCTAssertTrue(error.message.contains("different photo version"))
+        }
+        XCTAssertFalse(StubProtocol.seen.contains { $0.stubPath.hasSuffix("/interactive") },
+                       "an unsupported pair must not cause speculative reuploads")
+    }
+
+    func testMotionDuplicateStillRequiresTheTargetStillToExist() async throws {
+        StubProtocol.handler = Self.motionHandler(motionKey: "OTHER-VERSION", stillKey: nil)
+        let file = try scratchFile(name: "fixture-motion.mov")
+        let client = try GPMCClient(authData: Self.credential, session: StubProtocol.session())
+        do {
+            _ = try await client.prepareMotionUpload(file: file, filename: "fixture-motion.mov",
+                stillHash: Data(repeating: 1, count: 20)) { _ in }
+            XCTFail("missing target still must remain incomplete")
+        } catch let error as GPMCError {
+            XCTAssertEqual(error.kind, .pairedPhotoMissing)
+        }
     }
 
     /// The motion is committed onto its still, so without the still in the

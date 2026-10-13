@@ -55,14 +55,6 @@ final class AutomaticBackupCoordinator: ObservableObject {
     /// how long iOS took to honour it.
     static let lastRequestSubmittedKey = "diagnostics.scheduler.lastSubmittedAt"
 
-    /// Per-account flag: edited photos that earlier builds backed up as their
-    /// original have been queued again so their edited version is backed up.
-    static let editedVersionsQueuedKey = "backup.editedVersionsQueued.v1."
-
-    /// Per-account flag: the base version of photos edited in the Google Photos
-    /// app and already backed up has been queued.
-    static let editBasesQueuedKey = "backup.editBasesQueued.v1."
-
     private let photos: PhotosStack
     private let account: PhotosAccount
     private let queue: UploadQueue
@@ -71,6 +63,54 @@ final class AutomaticBackupCoordinator: ObservableObject {
     private let network: NetworkPolicyMonitor
     private let libraryChanges: PhotoLibraryChangeTracker
     private let execution: BackupExecutionController
+    let admission: BackupAdmissionMonitor
+    let notifications: BackupNotificationController
+    private var healthObservation: AnyCancellable?
+    private var queueObservation: AnyCancellable?
+    private var healthTask: Task<Void, Never>?
+    @Published private(set) var health: BackupHealthSnapshot?
+
+    private var selectedScope: BackupScopeDescriptor {
+        libraryChanges.scope(selectedAlbumIDs: preferences.selectedAlbumIDs,
+            accountIdentifier: account.status.email, rules: preferences.selectionRules,
+            includeLivePhotoMotion: preferences.backUpLivePhotoMotion,
+            includeOriginals: preferences.backUpOriginals,
+            authorization: PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue)
+    }
+
+    func refreshHealth() {
+        healthTask?.cancel()
+        let scope = selectedScope
+        let manifest = libraryChanges.coverage(for: scope)
+        let scannedAt = libraryChanges.lastSuccessfulScan(for: scope)
+        let completed = queue.completedSourceKeys
+        let items = queue.items
+        let confirmations = queue.remoteConfirmations
+        healthTask = Task { @MainActor [weak self] in
+            let worker = Task.detached(priority: .utility) {
+                BackupHealthSnapshot(scope: scope, manifest: manifest, lastSuccessfulScan: scannedAt,
+                    completedKeys: completed, items: items, remoteConfirmations: confirmations)
+            }
+            let value = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
+            guard let self, !Task.isCancelled, self.selectedScope == scope else { return }
+            self.health = value
+        }
+        updateNotifications()
+    }
+
+    private func updateNotifications() {
+        let storageBlocked = (admission.decision.blocker == .localStorage || admission.decision.blocker == .storageUnavailable)
+            && !queue.isUserPaused && queue.items.contains { $0.state == .queued && $0.checkpoint == nil }
+            && queue.backupSession?.outcome.isComplete != true
+        notifications.enabled = preferences.backupNotifications
+        Task { await notifications.consider(queue.backupSession, account: queue.activeAccountScope,
+                                            problem: queue.attentionProblem, localStorageBlocked: storageBlocked) }
+    }
+
+    func admissionPreferencesDidChange() {
+        admission.updateSettings(preferences.admissionSettings)
+        refreshHealth()
+    }
 
     private var registered = false
     private var ranForegroundBackup = false
@@ -118,6 +158,24 @@ final class AutomaticBackupCoordinator: ObservableObject {
         self.network = network
         self.libraryChanges = libraryChanges ?? PhotoLibraryChangeTracker()
         self.execution = BackupExecutionController(queue: queue)
+        self.admission = BackupAdmissionMonitor(settings: preferences.admissionSettings)
+        let delivery = SystemBackupNotifications()
+        self.notifications = BackupNotificationController(delivery: delivery)
+        delivery.onOpen = { [weak notifications] session, tab in notifications?.open(session: session, tab: tab) }
+        queue.installAdmissionMonitor(admission)
+        admission.start()
+        queue.onSessionChange = { [weak self] _ in self?.updateNotifications() }
+        healthObservation = self.libraryChanges.$libraryRevision.dropFirst().sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.queue.invalidateSessionScope()
+                self.backupConfigurationDidChange()
+            }
+        }
+        queueObservation = queue.objectWillChange
+            .throttle(for: .seconds(1), scheduler: DispatchQueue.main, latest: true)
+            .sink { [weak self] _ in Task { @MainActor [weak self] in self?.refreshHealth() } }
+        refreshHealth()
         queue.followUpSources = { [weak self] source in
             self?.followUps(after: source) ?? []
         }
@@ -157,9 +215,8 @@ final class AutomaticBackupCoordinator: ObservableObject {
     func start() async {
         execution.setForeground(UIApplication.shared.applicationState == .active)
         await photos.start()
-        await queueEditedVersionsOnce()
-        await queueEditBasesOnce()
-        await queueLivePhotoMotion()
+        await admission.refresh()
+        refreshHealth()
         applyNetworkPolicy()
         updateSchedule()
         runForegroundBackupIfNeeded()
@@ -177,6 +234,8 @@ final class AutomaticBackupCoordinator: ObservableObject {
     }
 
     func backupConfigurationDidChange() {
+        queue.invalidateSessionScope()
+        refreshHealth()
         cancelForegroundScan()
         ranForegroundBackup = false
         updateSchedule()
@@ -187,17 +246,44 @@ final class AutomaticBackupCoordinator: ObservableObject {
         cancelForegroundScan()
         ranForegroundBackup = false
         queue.activateAccount(account.status.email)
+        notifications.activate(account: queue.activeAccountScope, session: queue.backupSession?.id)
+        refreshHealth()
         updateSchedule()
         runForegroundBackupIfNeeded()
-        Task {
-            await queueEditedVersionsOnce()
-            await queueEditBasesOnce()
-            await queueLivePhotoMotion()
-        }
     }
 
     func livePhotoMotionPreferenceDidChange() {
-        Task { await queueLivePhotoMotion() }
+        queue.options.requiresVariantMetadata = preferences.backUpOriginals || preferences.backUpLivePhotoMotion
+        backupConfigurationDidChange()
+    }
+    func originalPreferenceDidChange() { livePhotoMotionPreferenceDidChange() }
+
+    /// Explicit picker batches bypass album rules but snapshot all readable
+    /// required components before starting their first upload.
+    func enqueueManualSelection(_ sources: [MediaSource]) async {
+        guard !sources.isEmpty else { return }
+        let owner = queue.beginDiscovery(requiresCompleteScope: false)
+        var complete = false
+        defer { queue.endDiscovery(owner, complete: complete) }
+        let scope = selectedScope
+        let worker = Task.detached(priority: .userInitiated) { () -> ([MediaSource], Bool) in
+            var planned: [MediaSource] = []
+            var readable = true
+            for source in sources {
+                guard !Task.isCancelled else { return ([], false) }
+                if case .asset(let id) = source {
+                    if let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject {
+                        planned += MediaComponentPlan.requiredSources(for: asset,
+                            includeLivePhotoMotion: scope.includeLivePhotoMotion, includeOriginals: scope.includeOriginals)
+                    } else { planned.append(source); readable = false }
+                } else { planned.append(source) }
+            }
+            return (planned, readable)
+        }
+        let plan = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
+        guard !Task.isCancelled, queue.ownsDiscovery(owner), scope == selectedScope else { return }
+        queue.reverify(plan.0)
+        complete = plan.1 && queue.persistenceWarning == nil
     }
 
     /// What else has to back up once this row's source is in the account: a
@@ -210,117 +296,21 @@ final class AutomaticBackupCoordinator: ObservableObject {
     private func followUps(after source: MediaSource) -> [MediaSource] {
         // A motion or edit-base row is itself a follow-up and has none of its
         // own. Checked before the fetch, which is the expensive part.
-        guard case .asset(let identifier) = source,
-              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject
-        else { return [] }
-        var followUps: [MediaSource] = []
-        if preferences.backUpLivePhotoMotion, asset.mediaSubtypes.contains(.photoLive) {
-            followUps.append(.livePhotoMotion(localIdentifier: identifier))
-        }
-        // Reads the asset's resources, so it is left until last: it only runs
-        // for an asset that carries an adjustment.
-        if MediaExporter.hasEditBase(asset) {
-            followUps.append(.editBase(localIdentifier: identifier))
-        }
-        return followUps
-    }
-
-    /// Once per account, queue the edit base of every photo already remembered
-    /// as backed up. New photos get theirs as a follow-up.
-    private func queueEditBasesOnce() async {
-        // Each early return leaves the flag unset so a later launch tries again.
-        guard let email = account.status.email, MediaLibrary.isReadable,
-              queue.persistenceWarning == nil else { return }
-        let flag = Self.editBasesQueuedKey + email.lowercased()
-        guard !UserDefaults.standard.bool(forKey: flag) else { return }
-        let identifiers = queue.completedSourceKeys.compactMap { key in
-            key.hasPrefix("asset:") ? String(key.dropFirst("asset:".count)) : nil
-        }
-        let bases = await Task.detached(priority: .utility) { () -> [MediaSource] in
-            var found: [MediaSource] = []
-            PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil).enumerateObjects { asset, _, _ in
-                if MediaExporter.hasEditBase(asset) { found.append(.editBase(localIdentifier: asset.localIdentifier)) }
-            }
-            return found
-        }.value
-        // The library read runs off the main actor; the account can change meanwhile.
-        guard account.status.email == email else { return }
-        let queued = queue.enqueue(bases, skippingExisting: true).count
-        guard queue.persistenceWarning == nil else { return }
-        UserDefaults.standard.set(true, forKey: flag)
-        DiagnosticEventLog.shared.record(
-            "queue",
-            "Queued the pre-edit version of \(queued) photo\(queued == 1 ? "" : "s") edited in the Google Photos app, which that app checks before it counts them as backed up"
-        )
-    }
-
-    /// Queue the motion of every Live Photo remembered as backed up whose motion
-    /// is not recorded yet, including those backed up before motion was
-    /// supported. Runs at each start: the enqueue skips rows already tracked, so
-    /// this only ever adds what is missing.
-    func queueLivePhotoMotion() async {
-        guard preferences.backUpLivePhotoMotion, let email = account.status.email, MediaLibrary.isReadable,
-              queue.persistenceWarning == nil else { return }
-        let completed = queue.completedSourceKeys
-        let identifiers = completed.compactMap { key -> String? in
-            guard key.hasPrefix("asset:") else { return nil }
-            let identifier = String(key.dropFirst("asset:".count))
-            return completed.contains(UploadQueue.motionKeyPrefix + identifier) ? nil : identifier
-        }
-        guard !identifiers.isEmpty else { return }
-        let motions = await Task.detached(priority: .utility) { () -> [MediaSource] in
-            var found: [MediaSource] = []
-            PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil).enumerateObjects { asset, _, _ in
-                if asset.mediaSubtypes.contains(.photoLive) {
-                    found.append(.livePhotoMotion(localIdentifier: asset.localIdentifier))
-                }
-            }
-            return found
-        }.value
-        // The library read runs off the main actor; the account or the setting can change meanwhile.
-        guard account.status.email == email, preferences.backUpLivePhotoMotion, !motions.isEmpty else { return }
-        let queued = queue.enqueue(motions, skippingExisting: true).count
-        if queued > 0 {
-            DiagnosticEventLog.shared.record(
-                "queue",
-                "Queued the motion of \(queued) Live Photo\(queued == 1 ? "" : "s") already backed up as a still, so it plays as a Live Photo and Google Photos can free it"
-            )
+        guard let identifier = source.assetIdentifier,
+              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else { return [] }
+        switch source {
+        case .asset:
+            return MediaComponentPlan.requiredSources(for: asset,
+                includeLivePhotoMotion: preferences.backUpLivePhotoMotion, includeOriginals: preferences.backUpOriginals)
+                .filter { $0 != source && { if case .originalMotion = $0 { return false }; return true }($0) }
+        case .original where preferences.backUpOriginals && preferences.backUpLivePhotoMotion && asset.mediaSubtypes.contains(.photoLive):
+            return [.originalMotion(localIdentifier: identifier)]
+        default: return []
         }
     }
 
-    /// Earlier builds backed up an edited photo as its unedited original. The
-    /// Google Photos app never matches that to the photo on this iPhone, so its
-    /// Free up space never offered it. Once per account, queue every edited
-    /// photo already remembered as backed up so its edited version goes up; the
-    /// hash lookup settles any whose edited bytes Google Photos already holds.
-    private func queueEditedVersionsOnce() async {
-        // Each early return leaves the flag unset so a later launch tries again:
-        // without library access nothing can be read, and a completion ledger
-        // that failed to load reads as empty rather than as nothing to do.
-        guard let email = account.status.email, MediaLibrary.isReadable,
-              queue.persistenceWarning == nil else { return }
-        let flag = Self.editedVersionsQueuedKey + email.lowercased()
-        guard !UserDefaults.standard.bool(forKey: flag) else { return }
-        let identifiers = queue.completedSourceKeys.compactMap { key in
-            key.hasPrefix("asset:") ? String(key.dropFirst("asset:".count)) : nil
-        }
-        let edited = await Task.detached(priority: .utility) { () -> [MediaSource] in
-            var found: [MediaSource] = []
-            PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil).enumerateObjects { asset, _, _ in
-                if asset.hasAdjustments { found.append(.asset(localIdentifier: asset.localIdentifier)) }
-            }
-            return found
-        }.value
-        // The library read runs off the main actor; the account can change meanwhile.
-        guard account.status.email == email else { return }
-        let result = queue.reverify(edited)
-        guard queue.persistenceWarning == nil else { return }
-        UserDefaults.standard.set(true, forKey: flag)
-        DiagnosticEventLog.shared.record(
-            "queue",
-            "Queued \(result.enqueued) edited photo\(result.enqueued == 1 ? "" : "s") that were backed up as their original, so the edited version Google Photos looks for is backed up too"
-        )
-    }
+    // Full scoped discovery now handles legacy edit rechecks and missing
+    // companions together. Independent all-account backfills would bypass rules.
 
     func applicationDidEnterBackground() {
         cancelForegroundScan()
@@ -349,6 +339,8 @@ final class AutomaticBackupCoordinator: ObservableObject {
 
     func applicationDidBecomeActive() {
         execution.setForeground(true)
+        refreshHealth()
+        Task { await admission.refresh() }
         finishContinuedRun(success: true, ending: "the app was opened")
         queue.setMaxConcurrent(preferences.concurrentUploads)
         if shouldRunAfterActivation {
@@ -382,7 +374,7 @@ final class AutomaticBackupCoordinator: ObservableObject {
 
         let request = BGProcessingTaskRequest(identifier: Self.taskIdentifier)
         request.requiresNetworkConnectivity = true
-        request.requiresExternalPower = false
+        request.requiresExternalPower = preferences.admissionSettings.onlyWhileCharging
         request.earliestBeginDate = Date(timeIntervalSinceNow: Self.processingRequestDelay)
         do {
             try BGTaskScheduler.shared.submit(request)
@@ -485,22 +477,9 @@ final class AutomaticBackupCoordinator: ObservableObject {
             guard let self else { return }
             let completedBefore = self.queue.completedSourceCount
             let run = AutomaticBackupRunHistory.started(.foreground, context: self.executionContext())
-            await self.albums.refresh()
-            if self.albums.canRead, !Task.isCancelled {
-                let email = self.account.status.email
-                let selected = self.preferences.selectedAlbumIDs
-                let scan = await self.libraryChanges.scanAll(albums: self.albums, selectedAlbumIDs: selected,
-                                                            accountIdentifier: email)
-                if !Task.isCancelled, self.account.status.email == email,
-                   self.preferences.selectedAlbumIDs == selected {
-                    self.enqueueScan(scan)
-                    await self.performForegroundBackup(scan.sources)
-                }
-            } else {
-                // Access was refused or not decided yet. Release the once-per
-                // foreground latch so granting it later still starts a scan.
-                self.ranForegroundBackup = false
-            }
+            if let result = await self.discoverSelection(full: true) {
+                await self.performForegroundBackup(result.scan.sources)
+            } else { self.ranForegroundBackup = false }
             if self.foregroundRunID == runID {
                 self.foregroundOperation = nil
                 self.foregroundRunID = nil
@@ -522,21 +501,46 @@ final class AutomaticBackupCoordinator: ObservableObject {
         }
         AutomaticBackupRunHistory.finished(
             run,
-            success: !Task.isCancelled && albums.canRead && queue.failedCount == 0,
+            success: !Task.isCancelled && queue.backupSession?.outcome == .completed,
             summary: summary
         )
     }
 
     /// All scan paths invalidate the same revisions before deduplication and
     /// commit their baseline only after the queue has persisted the changes.
-    @discardableResult
-    private func enqueueScan(_ scan: PhotoLibraryChangeTracker.Scan, limit: Int? = nil) -> UploadQueue.EnqueueOutcome {
+    /// The scan owns completion across every await and the durable queue handoff.
+    /// Overlapping windows release only their own token; any incomplete scan keeps
+    /// this logical session incomplete until a later complete discovery succeeds.
+    private func discoverSelection(full: Bool, reverify: Bool = false, limit: Int? = nil)
+        async -> (scan: PhotoLibraryChangeTracker.Scan, outcome: UploadQueue.EnqueueOutcome, released: Int)? {
+        let owner = queue.beginDiscovery()
+        var complete = false
+        defer { queue.endDiscovery(owner, complete: complete); refreshHealth() }
+        let scope = selectedScope
+        await admission.refresh()
+        await albums.refresh()
+        guard albums.canRead, !Task.isCancelled, queue.ownsDiscovery(owner), scope == selectedScope else { return nil }
+        let scan: PhotoLibraryChangeTracker.Scan
+        if full {
+            scan = await libraryChanges.scanAll(albums: albums, selectedAlbumIDs: preferences.selectedAlbumIDs,
+                accountIdentifier: account.status.email, rules: preferences.selectionRules,
+                includeLivePhotoMotion: preferences.backUpLivePhotoMotion, includeOriginals: preferences.backUpOriginals)
+        } else {
+            scan = await libraryChanges.scan(albums: albums, selectedAlbumIDs: preferences.selectedAlbumIDs,
+                accountIdentifier: account.status.email, rules: preferences.selectionRules,
+                includeLivePhotoMotion: preferences.backUpLivePhotoMotion, includeOriginals: preferences.backUpOriginals)
+        }
+        guard !Task.isCancelled, queue.ownsDiscovery(owner), scope == selectedScope, scan.scope == scope else { return nil }
+        let released = queue.retryRetryableFailures()
         queue.invalidateChangedSources(scan.editedSources)
+        if reverify { _ = queue.reverify(scan.sources, limit: limit) }
         let outcome = queue.enqueueReportingLimit(scan.sources, skippingExisting: true, limit: limit)
         if queue.persistenceWarning == nil {
-            libraryChanges.commit(scan, advanceToken: !outcome.reachedLimit)
+            let committed = libraryChanges.commit(scan, advanceToken: !outcome.reachedLimit)
+            complete = committed && !outcome.reachedLimit && scan.coverage != nil
+                && scan.coverage?.unavailableMetadataCount == 0
         }
-        return outcome
+        return (scan, outcome, released)
     }
 
     /// Hand the selection to the queue and wait while it drains.
@@ -567,7 +571,7 @@ final class AutomaticBackupCoordinator: ObservableObject {
     /// Any condition that stops the queue starting new work. Polling past one
     /// of these makes no progress and only keeps the main actor awake.
     private var isPausedForAnyReason: Bool {
-        queue.isUserPaused || queue.networkPauseReason != nil || queue.systemPauseReason != nil
+        queue.isUserPaused || queue.networkPauseReason != nil || queue.systemPauseReason != nil || queue.admissionPauseReason != nil
     }
 
     /// The result of a manual "Back Up Now" or "Re-check Backups", so the UI can
@@ -584,22 +588,10 @@ final class AutomaticBackupCoordinator: ObservableObject {
     /// everything this run will attempt rather than the size of a first page.
     func backUpSelectedAlbumsNow() async -> ManualRunOutcome {
         guard !preferences.selectedAlbumIDs.isEmpty else { return noteManual(.manual, .noAlbumsSelected) }
-        await albums.refresh()
-        guard albums.canRead else { return noteManual(.manual, .noLibraryAccess) }
-        let email = account.status.email
-        let selected = preferences.selectedAlbumIDs
-        let scan = await libraryChanges.scanAll(albums: albums, selectedAlbumIDs: selected, accountIdentifier: email)
-        guard !Task.isCancelled, account.status.email == email, preferences.selectedAlbumIDs == selected else {
-            return noteManual(.manual, .nothingToDo)
-        }
-        // Released before the count is taken, not inside the run, so a retried
-        // failure is part of the number the user is shown. A failed row already
-        // tracks its source, so `enqueue` cannot count it a second time.
-        let released = queue.retryRetryableFailures()
-        let accepted = enqueueScan(scan)
-        let total = accepted.accepted.count + released
+        guard let result = await discoverSelection(full: true) else { return noteManual(.manual, .noLibraryAccess) }
+        let total = result.outcome.accepted.count + result.released
         guard total > 0 else { return noteManual(.manual, .nothingToDo) }
-        startForegroundRun(scan.sources, source: .manual)
+        startForegroundRun(result.scan.sources, source: .manual)
         return .started(count: total)
     }
 
@@ -608,24 +600,11 @@ final class AutomaticBackupCoordinator: ObservableObject {
     /// cloud without re-uploading it.
     func reverifySelectedAlbums() async -> ManualRunOutcome {
         guard !preferences.selectedAlbumIDs.isEmpty else { return noteManual(.recheck, .noAlbumsSelected) }
-        await albums.refresh()
-        guard albums.canRead else { return noteManual(.recheck, .noLibraryAccess) }
-        let email = account.status.email
-        let selected = preferences.selectedAlbumIDs
-        let scan = await libraryChanges.scanAll(albums: albums, selectedAlbumIDs: selected, accountIdentifier: email)
-        guard !Task.isCancelled, account.status.email == email, preferences.selectedAlbumIDs == selected,
-              !scan.sources.isEmpty else { return noteManual(.recheck, .nothingToDo) }
-        // A failed row is not in the completion ledger, so `reverify` cannot see
-        // it — and as a tracked row it blocks its own source from being enqueued
-        // again. Releasing first is what makes this the "check everything is
-        // actually backed up" action the button claims to be.
-        let released = queue.retryRetryableFailures()
-        queue.invalidateChangedSources(scan.editedSources)
-        let result = queue.reverify(scan.sources)
-        if queue.persistenceWarning == nil { libraryChanges.commit(scan) }
-        let total = result.enqueued + released
+        // Count is the current queue after reverify; individual components are explicit.
+        guard let result = await discoverSelection(full: true, reverify: true) else { return noteManual(.recheck, .noLibraryAccess) }
+        let total = queue.activeCount
         guard total > 0 else { return noteManual(.recheck, .nothingToDo) }
-        startForegroundRun(scan.sources, source: .recheck)
+        startForegroundRun(result.scan.sources, source: .recheck)
         return .rechecking(count: total)
     }
 
@@ -798,25 +777,14 @@ final class AutomaticBackupCoordinator: ObservableObject {
                                 summary: decision.pauseReason ?? "The connection policy does not allow uploads"))
         }
 
-        let email = account.status.email
-        let selected = preferences.selectedAlbumIDs
-        await albums.refresh()
-        if let report = interruption() { return finish(report) }
-        guard account.status.email == email, preferences.selectedAlbumIDs == selected else {
-            return finish(.init(success: true, summary: "The account or album selection changed; the next run will scan it"))
-        }
-        guard albums.canRead else {
-            return finish(.init(success: false,
-                                summary: "No photo library access (\(DiagnosticReportBuilder.photoAuthorization()))"))
-        }
-        let scan = libraryChanges.scan(albums: albums, selectedAlbumIDs: selected, accountIdentifier: email)
-        if let report = interruption() { return finish(report) }
-        // Release earlier transport/5xx failures before enqueueing. They are
-        // invisible to the scan (the dedup treats a failed row as a durable
-        // handle), so without this a network blip parks those items forever.
-        let released = queue.retryRetryableFailures()
         let failuresBefore = queue.failedCount
-        let outcome = enqueueScan(scan, limit: Self.backgroundBatchLimit)
+        guard let discovery = await discoverSelection(full: false, limit: Self.backgroundBatchLimit) else {
+            return finish(.init(success: false, summary: "The scope could not be scanned; unfinished work remains queued"))
+        }
+        let scan = discovery.scan
+        let outcome = discovery.outcome
+        let released = discovery.released
+        if let report = interruption() { return finish(report) }
 
         let backedUpBefore = queue.completedSourceCount
         let settled: Bool
@@ -1036,11 +1004,13 @@ extension AutomaticBackupCoordinator {
     #endif
 
     private func queueCanMoveOnItsOwn(ignoringSystemPause: Bool = false) -> Bool {
-        ContinuedBackupPolicy.shouldContinue(
+        // Admission controls must not release execution time owned by work already admitted.
+        if queue.admissionPauseReason != nil && queue.runningCount > 0 { return true }
+        return ContinuedBackupPolicy.shouldContinue(
             hasWorkableItems: queue.hasWorkableItems,
             userPaused: queue.isUserPaused,
             halted: queue.haltReason != nil,
-            networkPaused: queue.networkPauseReason != nil,
+            networkPaused: queue.networkPauseReason != nil || queue.admissionPauseReason != nil,
             systemPaused: !ignoringSystemPause && queue.systemPauseReason != nil
         )
     }
@@ -1108,7 +1078,7 @@ extension AutomaticBackupCoordinator {
     #if compiler(>=6.2)
     @available(iOS 26.0, *)
     private func endContinuedBackup(_ session: ContinuedBackupSession) {
-        let idle = queue.isIdle
+        let idle = queue.backupSession?.outcome == .completed
         let reason = idle ? "nothing is left to back up" : (queue.pauseReason ?? "nothing can move on its own")
         finishContinuedRun(success: idle, ending: reason)
         DiagnosticEventLog.shared.record("scheduler", "Ended the background continuation: \(reason)")

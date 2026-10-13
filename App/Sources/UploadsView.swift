@@ -1,13 +1,20 @@
+import Combine
 import SwiftUI
 
 struct UploadsView: View {
     @EnvironmentObject private var account: PhotosAccount
     @EnvironmentObject private var queue: UploadQueue
     @EnvironmentObject private var preferences: BackupPreferences
+    @EnvironmentObject private var automaticBackup: AutomaticBackupCoordinator
     let onBlackScreen: () -> Void
     @State private var showPicker = false
     @State private var showingStopBackupConfirmation = false
     @State private var inspectedFailure: FailureDetail?
+    @State private var filter: ActivityFilter = .all
+    @State private var search = ""
+    @State private var selectingFailures = false
+    @State private var selectedFailures: Set<UUID> = []
+    @StateObject private var browser = ActivityBrowser()
 
     /// A failed row's full text, snapshotted when it is tapped. The row itself
     /// can be retried or cleared while the sheet is open.
@@ -26,15 +33,23 @@ struct UploadsView: View {
                         .padding(.vertical, 4)
                 }
                 if let reason = queue.pauseReason { pausedSection(reason) }
+                else if let reason = queue.admissionStatusReason {
+                    Section {
+                        Label("Backup Conditions", systemImage: "thermometer")
+                        Text(reason).font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
                 if let warning = queue.persistenceWarning { persistenceWarningSection(warning) }
                 if queue.items.isEmpty { emptySection }
                 else {
                     queueManagementSection
+                    browsingSection
                     activitySection
                 }
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Activity")
+            .searchable(text: $search, prompt: "Search displayed names")
             .sheet(isPresented: $showPicker) {
                 PhotoPicker { sources in enqueue(sources) }.ignoresSafeArea()
             }
@@ -51,6 +66,13 @@ struct UploadsView: View {
             }
         }
         .navigationViewStyle(.stack)
+        .onReceive(queue.$items.throttle(for: .milliseconds(300), scheduler: RunLoop.main, latest: true)) { items in
+            browser.refresh(items, filter: filter, search: search)
+        }
+        .onChange(of: filter) { _ in refreshBrowser() }
+        .onChange(of: search) { _ in refreshBrowser() }
+        .onChange(of: browser.failedIDs) { selectedFailures.formIntersection($0) }
+        .onDisappear { browser.stop() }
     }
 
     /// Photos picked by hand are checked against Google even when the app
@@ -59,7 +81,7 @@ struct UploadsView: View {
     /// anything Google already has.
     private func enqueue(_ sources: [MediaSource]) {
         guard !sources.isEmpty else { return }
-        queue.reverify(sources)
+        Task { await automaticBackup.enqueueManualSelection(sources) }
     }
 
     private var manualBackupSection: some View {
@@ -168,10 +190,13 @@ struct UploadsView: View {
                 }
                 .padding(.vertical, 6)
             }
-            ForEach(queue.items) { item in activityRow(item) }
+            if browser.rows.isEmpty {
+                Text("No items match this filter and search.").font(.footnote).foregroundStyle(.secondary)
+            }
+            ForEach(browser.rows) { item in activityRow(item) }
         } header: {
             HStack {
-                Text("Uploads")
+                Text("\(browser.rows.count) shown · \(browser.overallCount) total")
                 Spacer()
                 if !queue.isIdle { Text("\(queue.activeCount) remaining") }
             }
@@ -179,6 +204,36 @@ struct UploadsView: View {
             if queue.deferredForICloudCount > 0 {
                 Text("\(queue.deferredForICloudCount) items need to download from iCloud first. Keep the app open to finish them.")
             }
+        }
+    }
+
+    private func refreshBrowser() { browser.refresh(queue.items, filter: filter, search: search) }
+
+    private var browsingSection: some View {
+        Section {
+            Picker("Show", selection: $filter) {
+                ForEach(ActivityFilter.allCases) { category in
+                    Text("\(category.rawValue) (\(browser.counts[category, default: 0]))").tag(category)
+                }
+            }
+            if queue.failedCount > 0 {
+                Toggle("Select Failed Items", isOn: $selectingFailures)
+                    .onChange(of: selectingFailures) { if !$0 { selectedFailures.removeAll() } }
+            }
+            if selectingFailures {
+                Button("Select Visible Failures") {
+                    selectedFailures = Set(browser.rows.filter { ActivityFilter.failed.includes($0.state) }.map(\.id))
+                }
+                Button("Retry Selected (\(selectedFailures.count))") {
+                    queue.retrySelectedFailed(selectedFailures)
+                    selectedFailures.removeAll()
+                }
+                .disabled(selectedFailures.isEmpty || !account.status.isUsable)
+            }
+        } header: {
+            Text("Browse Activity")
+        } footer: {
+            Text("Filters and search change this list only. Completed counts refer to components, including originals and Live Photo motion. Manually chosen items bypass automatic album rules.")
         }
     }
 
@@ -196,10 +251,21 @@ struct UploadsView: View {
 
     private func activityRow(_ item: UploadItem) -> some View {
         HStack(spacing: 12) {
-            FeatureIcon(symbol: symbol(item.state), color: tint(item.state), size: 42)
+            if selectingFailures && ActivityFilter.failed.includes(item.state) {
+                Button {
+                    if !selectedFailures.insert(item.id).inserted { selectedFailures.remove(item.id) }
+                } label: {
+                    Image(systemName: selectedFailures.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(BackupTheme.blue)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Select \(item.name)")
+                .accessibilityValue(selectedFailures.contains(item.id) ? "Selected" : "Not selected")
+            }
+            ActivityThumbnail(source: item.source, symbol: symbol(item.state), tint: tint(item.state))
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
-                    Text(item.name).font(.subheadline.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                    Text(item.name).font(.subheadline.weight(.medium)).lineLimit(2).truncationMode(.middle)
                     Spacer()
                     if item.byteCount > 0 {
                         Text(item.byteCount.formatted(.byteCount(style: .file)))

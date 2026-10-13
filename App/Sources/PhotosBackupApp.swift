@@ -22,6 +22,7 @@ struct PhotosBackupApp: App {
         let network = NetworkPolicyMonitor()
         stack.queue.options.storageSaver = preferences.storageSaver
         stack.queue.options.useQuota = preferences.useQuota
+        stack.queue.options.requiresVariantMetadata = preferences.backUpOriginals || preferences.backUpLivePhotoMotion
         stack.queue.setMaxConcurrent(preferences.concurrentUploads)
         let automaticBackup = AutomaticBackupCoordinator(
             photos: stack,
@@ -66,6 +67,7 @@ struct PhotosBackupApp: App {
                 .environmentObject(preferences)
                 .environmentObject(albums)
                 .environmentObject(automaticBackup)
+                .environmentObject(automaticBackup.notifications)
                 .task { await automaticBackup.start() }
                 .onChange(of: scenePhase) { phase in
                     switch phase {
@@ -99,6 +101,10 @@ struct PhotosBackupApp: App {
                     DiagnosticEventLog.shared.record("settings", "Back Up Live Photo Motion turned \(value ? "on" : "off")")
                     automaticBackup.livePhotoMotionPreferenceDidChange()
                 }
+                .onChange(of: preferences.backUpOriginals) { _ in automaticBackup.originalPreferenceDidChange() }
+                .onChange(of: preferences.selectionRules) { _ in automaticBackup.backupConfigurationDidChange() }
+                .onChange(of: preferences.admissionSettings) { _ in automaticBackup.admissionPreferencesDidChange() }
+                .onChange(of: preferences.backupNotifications) { _ in automaticBackup.refreshHealth() }
                 .onChange(of: preferences.concurrentUploads) { value in
                     DiagnosticEventLog.shared.record("settings", "Simultaneous uploads set to \(value)")
                     queue.setMaxConcurrent(value)

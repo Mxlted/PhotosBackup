@@ -23,6 +23,13 @@ without a desktop companion or hosted service.
 - Select albums from the local Photos library.
 - Queue individual photos, videos, or all items in selected albums.
 - Show hashing, duplicate-check, upload, and finalization progress per item.
+- Inspect **Backup Health** for the selected scope, scan freshness, remembered
+  completions, required components, unknown coverage, and actual Google confirmations.
+- Preview and apply photo/video, screenshot, screen-recording, and capture-date rules.
+- Optionally retain both the current edit and the unedited original.
+- Optionally gate new preparation by charging, battery, temperature, and free storage.
+- Filter and search Activity, view local thumbnails, and retry selected failures.
+- Read durable, account-scoped session summaries and opt into meaningful notifications.
 - Avoid re-uploading media already present in Google Photos.
 - Retry transient failures, cancel work, and resume after reconnecting.
 - Show why an upload failed in Google's own words, copyable from the row and
@@ -35,7 +42,7 @@ without a desktop companion or hosted service.
 - With Back Up Live Photo Motion on, back up a Live Photo with its motion
   attached, so it plays as a Live Photo and the Google Photos app's Free up
   space offers it. Live Photos backed up as a still earlier get their motion
-  added in the background.
+  queued when they are discovered within the selected albums and rules.
 - Back up a photo edited in the Google Photos app so that app counts it as
   backed up. Google Photos applies its own edit on top of the camera's
   Portrait blur or crop, and only counts the photo once the account holds that
@@ -108,7 +115,13 @@ Tap anywhere to see full status, pause reasons, and controls. **Return to Black
 Screen** restores the minimal view. Turn off **Show Status in Black Screen Mode**
 for a completely blank resting screen, then tap anywhere to show details again.
 This preference is saved for future sessions. It stays black even after the
-queue finishes or pauses. **Exit Black Screen** restores normal auto-lock
+queue finishes or pauses. **Restore Auto-Lock After Completion** is off by default;
+when enabled it restores normal auto-lock after the session's discovery and required
+components settle, including a finish with failures. A standalone picker batch
+covers those selections; it does not establish coverage of selected albums.
+Pauses and incomplete scans do not trigger it, and newly arriving work reacquires
+the override. A compact session summary appears
+when you reveal the details. **Exit Black Screen** restores normal auto-lock
 without stopping uploads; leaving the app also releases the override. The phone
 is still on and unlocked. OLED displays
 benefit from the black background; LCD displays still use a backlight. Screen
@@ -136,6 +149,37 @@ iOS 16+; iOS 15 may still show its home indicator.
   Guided Access.
 - If the phone warms up or uploads hit rate limits, reduce **Simultaneous
   Uploads**. More parallel uploads are not always faster.
+
+## Backup health and unattended settings
+
+Open **Home → Backup Health** for coverage of the active account, selected albums,
+rules, accessible Photos items, and enabled media components. Limited access stays
+visible. A clear queue is not proof of library coverage; local remembered completions
+are distinct from dated Google confirmation. Coverage requires a matching scan after
+selection/library changes or relaunch.
+
+Use **Albums → Backup Rules** to preview inclusion/exclusion before applying. Both
+media types are included by default. Date boundaries include both chosen days in the
+saved timezone. A date rule excludes items with no capture date. Explicit picker
+selections bypass rules; already queued work is kept. A picker batch joining an
+unfinished album session does not replace the outstanding scope scan: use **Back
+Up Now** to complete it. Rules never delete media or successful history.
+
+**Settings → Unattended Backup** provides optional charging, battery, thermal and
+free-storage admission controls, all initially off. They resume eligible work when
+conditions recover without overriding your Pause or Stop. Storage protection reserves
+2 GiB for each unknown-size item plus 1 GiB headroom; unusually large media can exceed
+that estimate. Existing background-transfer copies remain protected.
+
+**Enable Backup Notifications** requests permission only when tapped. Notices cover
+settled sessions, unresolved failures, and problems needing user action; no per-photo
+alerts are sent. **Backup Sessions** distinguishes uploaded assets, duplicates,
+components, failures, deferred items, and measured bytes. Active and waiting durations
+are unavailable rather than inferred from suspended time.
+
+See [backup semantics and limitations](docs/backup-semantics.md) and the
+[media-component model](docs/media-component-model.md) for migration, completion,
+original/edit, rule, notification, and platform details.
 
 ## Reporting a problem
 
@@ -297,8 +341,14 @@ Android master token → Photos access token → private Photos API
   though the library already holds it: an upload of the same bytes merges into
   that existing item. Any edit in Apple Photos makes a new file, which then
   counts once backed up.
-- An edited photo or video is backed up as it looks on the iPhone. Its
-  unedited original is kept only if an earlier backup uploaded it.
+- By default an edited photo or video is backed up as it looks on the iPhone;
+  its original is retained remotely only if uploaded earlier. The opt-in **Keep
+  Originals of Edited Media** setting also uploads the original, including for
+  previously completed assets within the selected albums and rules. This can add
+  files and consume more storage.
+  Google may show versions separately, without reversible editing history.
+  Identical Live Photo motion already attached to a different still is an explicit
+  unsupported pairing and remains incomplete, rather than being reported backed up.
 - Background album backup is opportunistic: iOS decides when each processing
   request runs and may delay it based on usage, battery, and system policy.
 - Continuing after you leave the app needs iOS 26, and iOS accepts the request
@@ -308,21 +358,24 @@ Android master token → Photos access token → private Photos API
 - Shortcuts can create extra backup opportunities on iOS 16+, but iOS gives
   each run about 30 seconds. The action queues durable work and gives prepared
   file transfers to the background URL session; it is not a periodic guarantee.
-- Background scans enqueue bounded batches of 250. The limit bounds memory, not
-  how much a window uploads: the queue is durable, so whatever a window cannot
+- Background scans enqueue bounded batches of 250 components (an asset can require
+  several components). The limit bounds queue admission, not how much a window
+  uploads: the queue is durable, so whatever a window cannot
   finish waits for the next one. Foreground scans and the manual Back Up Now and
-  Re-check Backups buttons queue the whole selection at once, so the count they
-  report is the full run and the queue's concurrency setting decides how much of
-  it moves at a time.
+  Re-check Backups buttons queue the whole matching selection and its required
+  components at once, so the count they report is the full run and the queue's
+  concurrency setting decides how much of it moves at a time.
   iOS 16+ background scans use a persistent PhotoKit change token; iOS 15 and
   expired-token recovery use a correctness-first current-library scan. The token
   advances once a scan's sources have all been handed to the queue, so a
   saturated queue stops re-enumerating the library on every window.
   Foreground and fallback scans compare saved asset revisions so edits are
-  detected even without change history. Editing or rechecking a photo also
-  invalidates its motion and edit-base records. The first scan after upgrading
-  from a version without revision tracking rechecks the selection against
-  Google; existing matching bytes are not uploaded again.
+  detected even without change history. A detected edit invalidates the current
+  appearance, its motion, and its edit-base records, while retaining immutable
+  original records. An explicit Re-check Backups also rechecks original and
+  original-motion components when required by the enabled settings. The first
+  scan after upgrading from a version without revision tracking rechecks the
+  selection against Google; existing matching bytes are not uploaded again.
 - Export, hashing, duplicate lookup, and upload initialization still need an
   execution window. Once initialized, the file PUT continues under iOS even if
   the processing window expires; the app persists the receipt before commit.

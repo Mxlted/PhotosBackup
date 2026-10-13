@@ -105,6 +105,9 @@ struct PhotosUploader {
         return { id, source, restoredCheckpoint, options, emit in
             let relay = UploadPhaseRelay(emit: emit)
             defer { relay.stop() }
+            if case .picked = source, options.requiresVariantMetadata {
+                throw GPMCError(message: "This picker selection provides only a rendered copy. Allow Photos library access and select it again to back up required originals or Live Photo motion, or turn those options off for a current-copy-only backup.")
+            }
             guard let client = await client() else {
                 throw GPMCError(kind: .credentialRejected, message: "No Google account is connected. Connect one and try again.")
             }
@@ -124,11 +127,6 @@ struct PhotosUploader {
                 let media: ExportedMedia
                 do {
                     media = try await exporter.export(source, allowsNetworkAccess: options.allowsICloudDownload)
-                } catch MediaExporter.Failure.noMotion {
-                    // A Live Photo whose motion is gone has nothing to attach. Settle
-                    // the row rather than leave a failure nobody can act on.
-                    DiagnosticEventLog.shared.record("upload", "A Live Photo had no motion left to back up, so its motion row finished without uploading")
-                    return .alreadyBackedUp(mediaKey: "")
                 } catch MediaExporter.Failure.noEditBase {
                     // Stacked on an edit that is not the Google Photos app's, or
                     // since reverted: nothing to add. Settle the row.
@@ -152,7 +150,11 @@ struct PhotosUploader {
                     pairedStillHash: media.pairedStillHash
                 )
                 let name: String
-                if media.pairedStillHash != nil {
+                if case .originalMotion = source {
+                    name = "\(media.filename) (original Live Photo motion)"
+                } else if case .original = source {
+                    name = "\(media.filename) (original)"
+                } else if media.pairedStillHash != nil {
                     name = "\(media.filename) (Live Photo motion)"
                 } else if case .editBase = source {
                     name = "\(media.filename) (before Google Photos edit)"

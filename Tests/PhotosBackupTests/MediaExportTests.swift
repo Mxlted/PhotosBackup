@@ -20,9 +20,9 @@ final class MediaExportTests: XCTestCase {
     /// an edited asset. Observed on device on 2026-09-18: an edited Live Photo
     /// backed up as its original never counted; as its rendered edit, it did.
     func testAnEditedAssetUploadsItsRenderedEditBeforeTheOriginal() {
-        XCTAssertEqual(MediaExporter.uploadResourceTypes(for: .image, edited: true), [.fullSizePhoto, .photo])
+        XCTAssertEqual(MediaExporter.uploadResourceTypes(for: .image, edited: true), [.fullSizePhoto])
         XCTAssertEqual(MediaExporter.uploadResourceTypes(for: .image, edited: false), [.photo, .fullSizePhoto])
-        XCTAssertEqual(MediaExporter.uploadResourceTypes(for: .video, edited: true), [.fullSizeVideo, .video])
+        XCTAssertEqual(MediaExporter.uploadResourceTypes(for: .video, edited: true), [.fullSizeVideo])
         XCTAssertEqual(MediaExporter.uploadResourceTypes(for: .video, edited: false), [.video, .fullSizeVideo])
 
         for type in [PHAssetMediaType.image, .video, .unknown] {
@@ -47,7 +47,15 @@ final class MediaExportTests: XCTestCase {
     /// edit's video for an edited Live Photo, as the Google Photos app attaches it.
     func testALivePhotoMotionIsThePairedVideoOfTheSameVersion() {
         XCTAssertEqual(MediaExporter.motionResourceTypes(edited: false), [.pairedVideo])
-        XCTAssertEqual(MediaExporter.motionResourceTypes(edited: true).first, .fullSizePairedVideo)
+        XCTAssertEqual(MediaExporter.motionResourceTypes(edited: true), [.fullSizePairedVideo])
+    }
+
+    func testOriginalPreservationNeverSubstitutesAnEditOrVideoPoster() {
+        XCTAssertEqual(MediaExporter.originalResourceTypes(for: .image), [.photo])
+        XCTAssertEqual(MediaExporter.originalResourceTypes(for: .video), [.video])
+        XCTAssertEqual(MediaExporter.originalResourceTypes(for: .unknown), [])
+        XCTAssertFalse(MediaExporter.uploadResourceTypes(for: .image, edited: true).contains(.photo),
+                       "an unavailable rendered edit cannot be replaced by the original and recorded complete")
     }
 
     func testARenderedEditIsUploadedUnderTheOriginalName() {

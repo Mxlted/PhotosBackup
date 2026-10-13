@@ -1,6 +1,7 @@
 import Foundation
 
 enum AutomaticBackupRunSource: String, Codable, Sendable {
+    case session = "Backup session"
     case foreground = "App open"
     case manual = "Back Up Now"
     case recheck = "Re-check Backups"
@@ -27,6 +28,7 @@ struct AutomaticBackupRunRecord: Codable, Equatable, Identifiable, Sendable {
     var finishedAt: Date?
     var success: Bool?
     var summary: String?
+    var accountScope: String? = nil
 
     var duration: TimeInterval? { finishedAt.map { $0.timeIntervalSince(startedAt) } }
 }
@@ -103,6 +105,20 @@ enum AutomaticBackupRunHistory {
         defaults: UserDefaults = .standard
     ) -> AutomaticBackupRunRecord? {
         load(defaults).last { $0.source == source }
+    }
+
+    /// Logical sessions share the bounded diagnostic history with execution windows.
+    /// Only aggregate counters are copied: no component or asset keys leave the queue.
+    static func recordSession(_ session: BackupSession, accountScope: String,
+                              defaults: UserDefaults = .standard) {
+        var records = load(defaults)
+        let record = AutomaticBackupRunRecord(id: session.id, source: .session,
+            startedAt: session.startedAt, context: nil, finishedAt: session.finishedAt,
+            success: session.outcome == .completed, summary: session.summary, accountScope: accountScope)
+        if let index = records.firstIndex(where: { $0.id == session.id }) { records[index] = record }
+        else { records.append(record) }
+        trim(&records)
+        save(records, defaults)
     }
 
     private static func trim(_ records: inout [AutomaticBackupRunRecord]) {

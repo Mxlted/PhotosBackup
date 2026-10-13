@@ -445,6 +445,16 @@ actor GPMCClient {
         let (hash, size) = try hashFile(file, phase: phase)
         phase(.checkingDuplicate)
         if let key = try await remoteMediaKey(sha1: hash, asLivePhotoMotion: true) {
+            // An edit can change only the still, leaving the original and
+            // rendered versions with identical motion bytes. A hash match on
+            // a different still is not proof this required pair is backed up.
+            guard let targetKey = try await remoteMediaKey(sha1: stillHash) else {
+                throw GPMCError(kind: .pairedPhotoMissing,
+                               message: "The photo for this Live Photo motion is not in Google Photos yet, so the motion waits for it.")
+            }
+            guard key == targetKey else {
+                throw GPMCError(message: "This Live Photo motion is already attached to a different photo version in Google Photos. Attaching identical motion to both versions is not supported reliably, so this version remains incomplete.")
+            }
             return .alreadyBackedUp(mediaKey: key)
         }
         guard try await remoteMediaKey(sha1: stillHash) != nil else {

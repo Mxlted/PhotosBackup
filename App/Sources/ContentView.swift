@@ -27,6 +27,7 @@ struct ContentView: View {
 }
 
 private struct MainAppView: View {
+    @EnvironmentObject private var notifications: BackupNotificationController
     @State private var selectedTab = 0
     @State private var showConnectionTutorial = false
     @State private var showBlackScreen = false
@@ -58,6 +59,17 @@ private struct MainAppView: View {
         // whole Google sign-in has to be repeated.
         .fullScreenCover(isPresented: $showConnectionTutorial) {
             ConnectionTutorialView()
+        }
+        .onChange(of: notifications.destinationTab) { tab in
+            guard let tab else { return }
+            showBlackScreen = false
+            selectedTab = tab
+            notifications.destinationTab = nil
+        }
+        .onAppear {
+            if let tab = notifications.destinationTab {
+                selectedTab = tab; notifications.destinationTab = nil
+            }
         }
         .fullScreenCover(isPresented: $showBlackScreen) {
             BlackScreenBackupView()
