@@ -142,14 +142,34 @@ struct UploadQueueSnapshot: Codable, Equatable, Sendable {
     let completedSourceKeys: [String]
     /// Optional so snapshots written by earlier releases remain decodable.
     let isUserPaused: Bool?
+    /// Full completion sets for accounts whose ledger updates failed. Omissions
+    /// override stale ledger entries, even after switching to another account.
+    /// Optional so version-1 snapshots from earlier builds still decode.
+    let completionLedgerOverrides: [String: [String]]?
 
     init(version: Int, accountIdentifier: String, items: [PersistedUploadItem],
-         completedSourceKeys: [String], isUserPaused: Bool? = nil) {
+         completedSourceKeys: [String], isUserPaused: Bool? = nil,
+         completionLedgerOverrides: [String: [String]]? = nil) {
         self.version = version
         self.accountIdentifier = accountIdentifier
         self.items = items
         self.completedSourceKeys = completedSourceKeys
         self.isUserPaused = isUserPaused
+        self.completionLedgerOverrides = completionLedgerOverrides
+    }
+
+    /// Update both representations in one atomic snapshot save. A crash after
+    /// removing a legacy key must not restore it from a recovery override.
+    func removingCompletions(_ keys: Set<String>, for identifier: String) -> UploadQueueSnapshot {
+        var overrides = completionLedgerOverrides
+        if let override = overrides?[identifier] {
+            overrides?[identifier] = override.filter { !keys.contains($0) }
+        }
+        return UploadQueueSnapshot(
+            version: version, accountIdentifier: accountIdentifier, items: items,
+            completedSourceKeys: accountIdentifier == identifier
+                ? completedSourceKeys.filter { !keys.contains($0) } : completedSourceKeys,
+            isUserPaused: isUserPaused, completionLedgerOverrides: overrides)
     }
 }
 
@@ -295,16 +315,9 @@ struct FileUploadQueuePersistence: UploadQueuePersisting {
     func removeCompletedSourceKeys(_ keys: Set<String>, for accountIdentifier: String) throws {
         guard !keys.isEmpty else { return }
         // Snapshot may still carry keys written before the separate ledger existed.
-        if let snapshot = try load(), snapshot.accountIdentifier == accountIdentifier,
-           !snapshot.completedSourceKeys.isEmpty {
-            let remaining = snapshot.completedSourceKeys.filter { !keys.contains($0) }
-            if remaining.count != snapshot.completedSourceKeys.count {
-                try save(UploadQueueSnapshot(version: snapshot.version,
-                                            accountIdentifier: snapshot.accountIdentifier,
-                                            items: snapshot.items,
-                                            completedSourceKeys: remaining,
-                                            isUserPaused: snapshot.isUserPaused))
-            }
+        if let snapshot = try load() {
+            let updated = snapshot.removingCompletions(keys, for: accountIdentifier)
+            if updated != snapshot { try save(updated) }
         }
         guard FileManager.default.fileExists(atPath: ledgerURL.path) else { return }
         let account = Data(accountIdentifier.utf8).base64EncodedString()
@@ -358,17 +371,12 @@ final class MemoryUploadQueuePersistence: UploadQueuePersisting {
                                             accountIdentifier: snapshot.accountIdentifier,
                                             items: snapshot.items,
                                             completedSourceKeys: snapshot.completedSourceKeys + [key],
-                                            isUserPaused: snapshot.isUserPaused)
+                                            isUserPaused: snapshot.isUserPaused,
+                                            completionLedgerOverrides: snapshot.completionLedgerOverrides)
     }
 
     func removeCompletedSourceKeys(_ keys: Set<String>, for accountIdentifier: String) throws {
-        guard !keys.isEmpty, let snapshot, snapshot.accountIdentifier == accountIdentifier else { return }
-        let remaining = snapshot.completedSourceKeys.filter { !keys.contains($0) }
-        guard remaining.count != snapshot.completedSourceKeys.count else { return }
-        self.snapshot = UploadQueueSnapshot(version: snapshot.version,
-                                            accountIdentifier: snapshot.accountIdentifier,
-                                            items: snapshot.items,
-                                            completedSourceKeys: remaining,
-                                            isUserPaused: snapshot.isUserPaused)
+        guard !keys.isEmpty, let snapshot else { return }
+        self.snapshot = snapshot.removingCompletions(keys, for: accountIdentifier)
     }
 }
