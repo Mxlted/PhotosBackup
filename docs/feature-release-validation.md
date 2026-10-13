@@ -123,7 +123,7 @@ scan-date retention also reported no actionable findings.
 | Final diff/staged-path checks and `AGENTS.md` exclusion | **PASS**; only intended paths staged, `git diff --check` clean, and `git ls-files -- AGENTS.md` empty after the implementation commit. Rechecked for the report commit. |
 | Final unsigned `./Scripts/make-ipa.sh` | **PASS**, `build/ipa-release.log`; new `build/PhotosBackup.ipa` is 3,206,724 bytes; ZIP integrity passed and privacy manifest is present. |
 | Fork delivery | Implementation `67fb5ea` pushed on `codex/backup-health-and-reliability`; [PR #2](https://github.com/Mxlted/PhotosBackup/pull/2) targets fork `main` and remains unmerged. The report is a separate documentation commit. |
-| Hosted CI | The PR's checks provide the authoritative current status. Its unchanged workflow uses Xcode 26.3; local final gates used Xcode 27. |
+| Hosted CI | **PASS: 8 core and 346 signed app tests, 0 failures**, Xcode 26.3 on iOS 18.5 (iPhone 16 Pro), [run 38452805017](https://github.com/Mxlted/PhotosBackup/actions/runs/38452805017), implementation plus report at `1131b81`. The subsequent documentation-only commit records this evidence. Local final gates used Xcode 27. |
 
 Signed simulator tests include real simulator Keychain coverage. The unsigned IPA
 is a separate packaging artifact and is not evidence that signed tests passed.
@@ -139,8 +139,9 @@ or populated-library UI audit. An intermediate run exposed two stale nonexistent
 fixtures after the missing-body guard; real temporary fixtures fixed them. A simulator
 Busy preflight failure was inspected before retrying; the final runs above passed.
 
-There is no installed runtime older than iOS 26.5: deployment remains iOS 15, but
-iOS 15–25 runtime behavior is unverified. No physical-device power/thermal, real
+There is no locally installed runtime older than iOS 26.5; hosted CI additionally
+passed on iOS 18.5. Deployment remains iOS 15, whose runtime behavior is unverified.
+No physical-device power/thermal, real
 notification delivery, iCloud download, background opportunity or Live Photo camera/editor
 combination is established by these simulator gates. Google original/edit grouping,
 quota behavior and live pairing have not been tested. Active and waiting durations
