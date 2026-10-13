@@ -83,7 +83,7 @@ Photos credential, and an authenticated `photosdata-pa` request succeeds.
 The Xcode project, app target, and scheme are named `PhotosBackup`; the
 user-facing app is named **Photos Backup**.
 
-Latest release: **0.3.9** ([releases](https://github.com/Mxlted/PhotosBackup/releases)).
+Latest release: **0.4.0** ([releases](https://github.com/Mxlted/PhotosBackup/releases)).
 Every push to `main` and pull request runs protocol tests on macOS and the
 offline suite on an iPhone simulator. CI explicitly excludes the 2 live tests.
 

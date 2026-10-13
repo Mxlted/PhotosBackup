@@ -4,7 +4,10 @@ Repository: `Mxlted/PhotosBackup`
 Baseline: fork `main` at `7d50d99`
 Working branch: `codex/backup-health-and-reliability`
 
-This report separates implemented behavior from verified execution. No live Google
+This report records the pre-release feature validation before the version bump to
+0.4.0 (build 18). Its artifact hash and PR state below describe that earlier handoff;
+see the [0.4.0 release](https://github.com/Mxlted/PhotosBackup/releases/tag/0.4.0)
+for the published IPA and checksum. No live Google
 or private-media testing is included. Implementation commit: `67fb5ea`.
 Pull request: [Mxlted/PhotosBackup #2](https://github.com/Mxlted/PhotosBackup/pull/2).
 
@@ -146,3 +149,17 @@ notification delivery, iCloud download, background opportunity or Live Photo cam
 combination is established by these simulator gates. Google original/edit grouping,
 quota behavior and live pairing have not been tested. Active and waiting durations
 remain unavailable; very large unknown media can exceed the storage reservation.
+
+## 0.4.0 release preparation
+
+The subsequent version bump sets marketing version `0.4.0` and build `18`, without
+changing the bundle identity, signing configuration, or deployment target. The
+versioned app passed all **346 signed offline tests** on iOS 26.5; see
+`build/test-results/run.pjleFS/Tests.xcresult`.
+
+`./Scripts/make-ipa.sh` produced a fresh local IPA; ZIP integrity, privacy manifest,
+bundle identity, version `0.4.0`, build `18`, and minimum iOS `15.0` were verified.
+Local Xcode 27 artifact: 3,206,725 bytes; SHA-256
+`55edb26848786af329ae4f2d3c970004e11a1da5accea0dfe5c3cc4b7b48eb6d`. Build log: `build/ipa-0.4.0.log`.
+The published release workflow builds separately with Xcode 26.3; its attached
+checksum is authoritative for that downloaded IPA and may differ from this local build.
