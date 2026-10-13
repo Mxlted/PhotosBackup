@@ -1,6 +1,15 @@
 import Foundation
 import UIKit
 
+/// The two session operations used by the transport. An injected session lets
+/// offline tests deliver relaunch events without starting system transfers.
+protocol BackgroundUploadSession: Sendable {
+    func getAllTasks(completionHandler: @escaping @Sendable ([URLSessionTask]) -> Void)
+    func uploadTask(with request: URLRequest, fromFile fileURL: URL) -> URLSessionUploadTask
+}
+
+extension URLSession: BackgroundUploadSession {}
+
 /// Delegate-driven file transport owned for the lifetime of the process. The
 /// URL session itself is owned by iOS, so PUTs keep running while the app is
 /// suspended or terminated and are reattached by their queue-item UUID.
@@ -22,6 +31,10 @@ final class BackgroundFileUploadTransport: NSObject, FileUploadTransport, @unche
     private typealias Waiter = CheckedContinuation<FileUploadResult, Error>
     private let lock = NSLock()
     private let delegateQueue: OperationQueue
+    private let sessionLock = NSLock()
+    private var storedSession: (any BackgroundUploadSession)?
+    private let sessionFactory: (URLSessionConfiguration, URLSessionDelegate, OperationQueue) -> any BackgroundUploadSession
+    private let resultsDirectory: URL
     private var waiters: [UUID: [Waiter]] = [:]
     private var progressHandlers: [UUID: @Sendable (Int64, Int64) -> Void] = [:]
     private var responseBodies: [Int: Data] = [:]
@@ -39,7 +52,12 @@ final class BackgroundFileUploadTransport: NSObject, FileUploadTransport, @unche
     private var deliveredSucceeded = 0
     private var deliveredFailed = 0
 
-    private lazy var session: URLSession = {
+    /// Swift lazy properties do not synchronize concurrent first access. Upload,
+    /// diagnostics and UIKit restoration can all be the first caller.
+    private var session: any BackgroundUploadSession {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        if let storedSession { return storedSession }
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         configuration.sessionSendsLaunchEvents = true
         configuration.isDiscretionary = false
@@ -50,10 +68,19 @@ final class BackgroundFileUploadTransport: NSObject, FileUploadTransport, @unche
         // exists, so this has to allow for the widest concurrency the user can
         // choose. The queue is what actually limits how many run at a time.
         configuration.httpMaximumConnectionsPerHost = UploadQueue.concurrencyRange.upperBound
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
-    }()
+        let created = sessionFactory(configuration, self, delegateQueue)
+        storedSession = created
+        return created
+    }
 
-    private override init() {
+    init(resultsDirectory: URL? = nil,
+         sessionFactory: @escaping (URLSessionConfiguration, URLSessionDelegate, OperationQueue) -> any BackgroundUploadSession = {
+             URLSession(configuration: $0, delegate: $1, delegateQueue: $2)
+         }) {
+        self.resultsDirectory = resultsDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("PhotosBackup", isDirectory: true)
+            .appendingPathComponent("BackgroundUploadResults", isDirectory: true)
+        self.sessionFactory = sessionFactory
         let queue = OperationQueue()
         queue.name = "PhotosBackup.BackgroundUploadDelegate"
         queue.maxConcurrentOperationCount = 1
@@ -74,7 +101,9 @@ final class BackgroundFileUploadTransport: NSObject, FileUploadTransport, @unche
                 var shouldReconcile = false
                 var wasCancelled = false
                 lock.lock()
-                if discarded.contains(transferID) {
+                // Cancellation may finish its task lookup before this waiter
+                // is registered and remove the transient discard marker.
+                if Task.isCancelled || discarded.contains(transferID) {
                     wasCancelled = true
                 } else {
                     waiters[transferID, default: []].append(continuation)
@@ -277,62 +306,88 @@ final class BackgroundFileUploadTransport: NSObject, FileUploadTransport, @unche
     private func reconcileOrStart(_ request: URLRequest, file: URL, transferID: UUID) {
         session.getAllTasks { [weak self] tasks in
             guard let self else { return }
-            if let task = tasks.first(where: { $0.taskDescription == transferID.uuidString }) {
-                self.lock.lock()
-                let shouldDiscard = self.discarded.contains(transferID)
-                self.starting.remove(transferID)
-                let reporter = self.progressHandlers[transferID]
-                self.lock.unlock()
-                if shouldDiscard {
-                    task.cancel()
-                    return
-                }
-                reporter?(task.countOfBytesSent, max(task.countOfBytesExpectedToSend, task.countOfBytesSent))
-                if task.state == .suspended { task.resume() }
-                DiagnosticEventLog.shared.record(
-                    "transport",
-                    "Reattached to an upload that iOS kept transferring in the background"
-                )
-                return
+            // Serialize receipt delivery and reconciliation. A completion may
+            // arrive while getAllTasks is taking its snapshot; re-read durable
+            // results before interpreting an absent task as a new PUT.
+            self.delegateQueue.addOperation {
+                self.reconcile(tasks, request: request, file: file, transferID: transferID)
             }
+        }
+    }
 
-            guard FileManager.default.fileExists(atPath: file.path) else {
-                DiagnosticEventLog.shared.record(
-                    "transport",
-                    "An upload's staged copy was missing, so it could not be handed to iOS; the item will be prepared again",
-                    level: .warning
-                )
-                self.resolve(transferID, with: StoredResult(
-                    url: request.url, statusCode: nil, headers: [:], body: Data(),
-                    errorCode: NSFileNoSuchFileError,
-                    errorDescription: "The staged upload file is missing."
-                ))
-                return
-            }
-            self.lock.lock()
-            let wasDiscarded = self.discarded.contains(transferID)
-            if wasDiscarded {
-                self.starting.remove(transferID)
-                self.discarded.remove(transferID)
-            }
-            self.lock.unlock()
-            guard !wasDiscarded else { return }
-            // Create outside the lock: `uploadTask(with:fromFile:)` must not
-            // run while holding `lock`. `starting` still contains the ID, so a
-            // concurrent cancel either finds this task via `getAllTasks` or
-            // leaves its marker for the re-check below.
-            let task = self.session.uploadTask(with: request, fromFile: file)
-            task.taskDescription = transferID.uuidString
-            self.lock.lock()
-            let racedDiscard = self.discarded.contains(transferID)
-            self.starting.remove(transferID)
-            self.lock.unlock()
-            if racedDiscard {
+    private func reconcile(_ tasks: [URLSessionTask], request: URLRequest, file: URL, transferID: UUID) {
+        let existingTask = tasks.first { $0.taskDescription == transferID.uuidString }
+        lock.lock()
+        let hasWaiter = !(waiters[transferID]?.isEmpty ?? true)
+        if !hasWaiter {
+            starting.remove(transferID)
+            let shouldDiscard = discarded.contains(transferID)
+            if existingTask == nil { discarded.remove(transferID) }
+            lock.unlock()
+            if shouldDiscard { existingTask?.cancel() }
+            return
+        }
+        lock.unlock()
+        if let stored = loadResult(for: transferID) {
+            resolve(transferID, with: stored)
+            return
+        }
+        if let task = existingTask {
+            lock.lock()
+            let shouldDiscard = discarded.contains(transferID)
+            starting.remove(transferID)
+            let reporter = progressHandlers[transferID]
+            lock.unlock()
+            if shouldDiscard {
                 task.cancel()
                 return
             }
-            task.resume()
+            reporter?(task.countOfBytesSent, max(task.countOfBytesExpectedToSend, task.countOfBytesSent))
+            if task.state == .suspended { task.resume() }
+            DiagnosticEventLog.shared.record(
+                "transport",
+                "Reattached to an upload that iOS kept transferring in the background"
+            )
+            return
         }
+
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            DiagnosticEventLog.shared.record(
+                "transport",
+                "An upload's staged copy was missing, so it could not be handed to iOS; the item will be prepared again",
+                level: .warning
+            )
+            resolve(transferID, with: StoredResult(
+                url: request.url, statusCode: nil, headers: [:], body: Data(),
+                errorCode: NSFileNoSuchFileError,
+                errorDescription: "The staged upload file is missing."
+            ))
+            return
+        }
+        lock.lock()
+        let wasDiscarded = discarded.contains(transferID)
+        if wasDiscarded {
+            starting.remove(transferID)
+            discarded.remove(transferID)
+        }
+        lock.unlock()
+        guard !wasDiscarded else { return }
+        // Create outside the lock: `uploadTask(with:fromFile:)` must not
+        // run while holding `lock`. `starting` still contains the ID, so a
+        // concurrent cancel either finds this task via `getAllTasks` or
+        // leaves its marker for the re-check below.
+        let task = session.uploadTask(with: request, fromFile: file)
+        task.taskDescription = transferID.uuidString
+        lock.lock()
+        let racedDiscard = discarded.contains(transferID)
+            || (waiters[transferID]?.isEmpty ?? true)
+        starting.remove(transferID)
+        lock.unlock()
+        if racedDiscard {
+            task.cancel()
+            return
+        }
+        task.resume()
     }
 
     private func cancelTask(transferID: UUID) {
@@ -408,12 +463,6 @@ final class BackgroundFileUploadTransport: NSObject, FileUploadTransport, @unche
             outcome = .failure(GPMCError(message: "Invalid server response."))
         }
         for continuation in continuations { continuation.resume(with: outcome) }
-    }
-
-    private var resultsDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("PhotosBackup", isDirectory: true)
-            .appendingPathComponent("BackgroundUploadResults", isDirectory: true)
     }
 
     private func resultURL(for transferID: UUID) -> URL {

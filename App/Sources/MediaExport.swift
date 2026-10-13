@@ -67,7 +67,7 @@ actor MediaExporter {
             switch self {
             case .missingAsset: return "That item is no longer in your photo library."
             case .noResource: return "That item has no file to upload."
-            case .liveOnly: return "That item is a Live Photo motion track, which this release does not upload."
+            case .liveOnly: return "That item has no still photo or standalone video to upload."
             case .noMotion: return "That Live Photo has no motion to back up."
             case .noEditBase: return "That photo has no Google Photos edit to back up the base of."
             case .iCloudDownloadRequired: return "That item is only in iCloud. It will continue when the app is open."
@@ -89,8 +89,13 @@ actor MediaExporter {
     /// `Transferable` closure, which runs wherever the system pleases, can use it.
     static func adopt(_ file: URL) throws -> URL {
         let destination = try stage(named: file.lastPathComponent)
-        try FileManager.default.copyItem(at: file, to: destination)
-        return destination
+        do {
+            try FileManager.default.copyItem(at: file, to: destination)
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+            throw error
+        }
     }
 
     /// Copy a picked item provider's file into staging. `loadFileRepresentation`
@@ -146,7 +151,12 @@ actor MediaExporter {
             return try await exportAsset(identifier, allowsNetworkAccess: allowsNetworkAccess)
         case .picked(let picked):
             let url = try await Self.copyToStaging(from: picked.provider)
-            return try describe(url, filename: url.lastPathComponent, modified: nil, temporary: true)
+            do {
+                return try describe(url, filename: url.lastPathComponent, modified: nil, temporary: true)
+            } catch {
+                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+                throw error
+            }
         case .livePhotoMotion(let identifier):
             return try await exportMotion(identifier, allowsNetworkAccess: allowsNetworkAccess)
         case .editBase(let identifier):
@@ -174,8 +184,8 @@ actor MediaExporter {
     /// on 2026-09-19).
     ///
     /// `.pairedVideo` / `.fullSizePairedVideo` are the Live Photo motion track.
-    /// Live Photos are a follow-up (ADR-001), so only the still or the plain
-    /// video is uploaded here.
+    /// Live Photo motion is uploaded by a separate follow-up row, so only the
+    /// still or the plain video is uploaded here.
     static func uploadResourceTypes(for mediaType: PHAssetMediaType, edited: Bool) -> [PHAssetResourceType] {
         let photo: [PHAssetResourceType] = edited ? [.fullSizePhoto, .photo] : [.photo, .fullSizePhoto]
         let video: [PHAssetResourceType] = edited ? [.fullSizeVideo, .video] : [.video, .fullSizeVideo]
@@ -236,30 +246,41 @@ actor MediaExporter {
             throw Failure.missingAsset
         }
         let resources = PHAssetResource.assetResources(for: asset)
-        guard let base = resources.first(where: { $0.type == .adjustmentBasePhoto }),
-              let adjustment = resources.first(where: { $0.type == .adjustmentData }),
-              await Self.adjustmentFormat(of: adjustment) == Self.googlePhotosEditFormat else {
+        guard let base = resources.first(where: { $0.type == .adjustmentBasePhoto }) else {
             throw Failure.noEditBase
         }
+        guard let adjustment = resources.first(where: { $0.type == .adjustmentData }) else {
+            throw Failure.unreadable("the photo's edit information is missing")
+        }
+        guard try await Self.adjustmentFormat(of: adjustment, allowsNetworkAccess: allowsNetworkAccess)
+                == Self.googlePhotosEditFormat else { throw Failure.noEditBase }
         let original = resources.first { $0.type == .photo }?.originalFilename
         let filename = Self.uploadFilename(original: original, rendition: base.originalFilename)
         return try await stage(base, as: filename, of: asset, allowsNetworkAccess: allowsNetworkAccess)
     }
 
-    /// `adjustmentFormatIdentifier` from an asset's adjustment plist, or nil.
-    private static func adjustmentFormat(of resource: PHAssetResource) async -> String? {
+    /// An unreadable adjustment is not proof that there is no Google Photos
+    /// edit. Propagate failures so the queue never records it as backed up.
+    private static func adjustmentFormat(of resource: PHAssetResource, allowsNetworkAccess: Bool) async throws -> String {
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = allowsNetworkAccess
         let collector = DataCollector()
-        let finished: Bool = await withCheckedContinuation { continuation in
-            PHAssetResourceManager.default().requestData(for: resource, options: nil) { chunk in
-                collector.append(chunk)
-            } completionHandler: { error in
-                continuation.resume(returning: error == nil)
+        do {
+            try await PHAssetResourceManager.default().readData(for: resource, options: options) {
+                collector.append($0)
             }
+        } catch {
+            throw readFailure(error, allowsNetworkAccess: allowsNetworkAccess)
         }
-        guard finished,
-              let plist = try? PropertyListSerialization.propertyList(from: collector.data, format: nil) as? [String: Any]
-        else { return nil }
-        return plist["adjustmentFormatIdentifier"] as? String
+        return try adjustmentFormat(from: collector.data)
+    }
+
+    static func adjustmentFormat(from data: Data) throws -> String {
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let format = plist["adjustmentFormatIdentifier"] as? String, !format.isEmpty else {
+            throw Failure.unreadable("the photo's edit information could not be verified")
+        }
+        return format
     }
 
     /// A Live Photo's paired video, plus the hash of the still it belongs to.
@@ -312,12 +333,8 @@ actor MediaExporter {
         options.isNetworkAccessAllowed = allowsNetworkAccess
         let hasher = StreamingSHA1()
         do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                PHAssetResourceManager.default().requestData(for: resource, options: options) { data in
-                    hasher.update(data)
-                } completionHandler: { error in
-                    if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-                }
+            try await PHAssetResourceManager.default().readData(for: resource, options: options) {
+                hasher.update($0)
             }
         } catch {
             throw readFailure(error, allowsNetworkAccess: allowsNetworkAccess)
@@ -377,28 +394,55 @@ enum MediaLibrary {
 }
 
 extension PHAssetResourceManager {
+    func readData(for resource: PHAssetResource, options: PHAssetResourceRequestOptions,
+                  consume: @escaping (Data) throws -> Void) async throws {
+        try await PhotoResourceReader.read(start: { data, completion in
+            self.requestData(for: resource, options: options,
+                             dataReceivedHandler: data, completionHandler: completion)
+        }, cancel: { self.cancelDataRequest($0) }, consume: consume)
+    }
+
     func writeData(for resource: PHAssetResource, toFile url: URL, options: PHAssetResourceRequestOptions) async throws {
         guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
-        let writeFailure = PhotoResourceWriteFailure()
-        let cancellation = PhotoResourceRequestCancellation(manager: self)
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                let requestID = self.requestData(for: resource, options: options) { data in
-                    do { try handle.write(contentsOf: data) }
-                    catch { writeFailure.record(error); cancellation.cancel() }
-                } completionHandler: { error in
-                    if let failure = writeFailure.error { continuation.resume(throwing: failure) }
-                    else if let error { continuation.resume(throwing: error) }
-                    else { continuation.resume() }
+        try await readData(for: resource, options: options) { try handle.write(contentsOf: $0) }
+    }
+}
+
+/// PhotoKit invokes the data and completion handlers on a serial queue. Keep
+/// consuming each chunk there, and cancel the underlying request on expiration
+/// or a consumer failure instead of waiting for a cloud resource to finish.
+enum PhotoResourceReader {
+    typealias Start = (@escaping (Data) -> Void, @escaping (Error?) -> Void) -> PHAssetResourceDataRequestID
+
+    static func read(start: Start, cancel: @escaping @Sendable (PHAssetResourceDataRequestID) -> Void,
+                     consume: @escaping (Data) throws -> Void) async throws {
+        try Task.checkCancellation()
+        let readFailure = PhotoResourceReadFailure()
+        let cancellation = PhotoResourceRequestCancellation(cancel: cancel)
+        do {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    let requestID = start({ data in
+                        guard readFailure.error == nil else { return }
+                        do { try consume(data) }
+                        catch { readFailure.record(error); cancellation.cancel() }
+                    }, { error in
+                        if let failure = readFailure.error { continuation.resume(throwing: failure) }
+                        else if let error { continuation.resume(throwing: error) }
+                        else { continuation.resume() }
+                    })
+                    cancellation.setRequestID(requestID)
                 }
-                cancellation.setRequestID(requestID)
+            } onCancel: {
+                cancellation.cancel()
             }
-        } onCancel: {
-            cancellation.cancel()
+        } catch {
+            try Task.checkCancellation()
+            throw error
         }
         try Task.checkCancellation()
     }
@@ -419,7 +463,7 @@ private final class StreamingSHA1: @unchecked Sendable {
     }
 }
 
-private final class PhotoResourceWriteFailure: @unchecked Sendable {
+private final class PhotoResourceReadFailure: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Error?
 
@@ -436,19 +480,19 @@ private final class PhotoResourceWriteFailure: @unchecked Sendable {
 }
 
 private final class PhotoResourceRequestCancellation: @unchecked Sendable {
-    private let manager: PHAssetResourceManager
+    private let cancelRequest: @Sendable (PHAssetResourceDataRequestID) -> Void
     private let lock = NSLock()
     private var requestID: PHAssetResourceDataRequestID?
     private var cancelled = false
 
-    init(manager: PHAssetResourceManager) { self.manager = manager }
+    init(cancel: @escaping @Sendable (PHAssetResourceDataRequestID) -> Void) { cancelRequest = cancel }
 
     func setRequestID(_ requestID: PHAssetResourceDataRequestID) {
         lock.lock()
         self.requestID = requestID
         let shouldCancel = cancelled
         lock.unlock()
-        if shouldCancel { manager.cancelDataRequest(requestID) }
+        if shouldCancel { cancelRequest(requestID) }
     }
 
     func cancel() {
@@ -456,7 +500,7 @@ private final class PhotoResourceRequestCancellation: @unchecked Sendable {
         cancelled = true
         let requestID = requestID
         lock.unlock()
-        if let requestID { manager.cancelDataRequest(requestID) }
+        if let requestID { cancelRequest(requestID) }
     }
 }
 
