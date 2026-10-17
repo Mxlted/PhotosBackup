@@ -13,7 +13,8 @@ final class BackupNotificationTests: XCTestCase {
         XCTAssertEqual(delivery.permissionRequests, 0, "Construction must not show a permission prompt")
         let allowed = await controller.requestPermission()
         XCTAssertFalse(allowed)
-        XCTAssertTrue(controller.permissionDescription.contains("not allowed"))
+        XCTAssertEqual(controller.permissionDescription,
+                       "Allow notifications in iPhone Settings to receive updates. Your backups will continue without them.")
         controller.enabled = true
         await controller.consider(session(.completed), account: "scope-one")
         XCTAssertTrue(delivery.messages.isEmpty)
