@@ -61,6 +61,6 @@ final class BlackScreenBackupTests: XCTestCase {
         XCTAssertEqual(disconnected.title, "Connect to back up")
         let empty = BlackScreenBackupStatus(accountUsable: true, pauseReason: nil,
                                             remaining: 0, failed: 0, waitingForICloud: 0)
-        XCTAssertEqual(empty.title, "Queue is clear", "An empty queue does not prove every album was scanned")
+        XCTAssertEqual(empty.title, "No uploads waiting", "An empty queue does not prove every album was scanned")
     }
 }

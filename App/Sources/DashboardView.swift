@@ -9,7 +9,7 @@ struct DashboardBackupStatus {
          completed: Int, hasSelectedAlbums: Bool) {
         if !accountUsable {
             title = "Connect to back up"
-            detail = "Connect an account to get started"
+            detail = "Keep a copy of your photos and videos in Google Photos."
         } else if let pauseReason {
             title = "Backup paused"
             detail = pauseReason
@@ -20,7 +20,7 @@ struct DashboardBackupStatus {
             title = "Backup needs attention"
             detail = "\(failed) items failed — open Activity to retry"
         } else {
-            title = completed > 0 ? "Queue is clear" : "Ready to back up"
+            title = completed > 0 ? "No uploads waiting" : "Ready to back up"
             detail = hasSelectedAlbums
                 ? "No pending uploads. Use Back Up Now to check your selected albums."
                 : "Choose albums to protect"
@@ -39,6 +39,8 @@ struct DashboardView: View {
     let onConnect: () -> Void
     let onAccount: () -> Void
     let onBlackScreen: () -> Void
+    let onAlbums: () -> Void
+    let onActivity: () -> Void
     @State private var showPicker = false
     @State private var showingStopBackupConfirmation = false
     @State private var manualRunMessage: String?
@@ -48,45 +50,28 @@ struct DashboardView: View {
         albums.albums.filter { preferences.selectedAlbumIDs.contains($0.id) }
     }
 
-    /// Unique-item estimate for the selection. "All Photos" spans the whole
-    /// image/video library, so when it is selected every other album is a
-    /// subset of it — summing per-album counts would count most assets twice.
-    private var selectedItemCount: Int {
-        if let all = selectedAlbums.first(where: { $0.isAllPhotos }) { return all.count }
-        return selectedAlbums.reduce(0) { $0 + $1.count }
-    }
-
     var body: some View {
         NavigationView {
             ScrollView {
-                LazyVStack(spacing: 16) {
+                LazyVStack(spacing: 20) {
                     accountBanner
                     backupHero
-                    if let health = automaticBackup.health {
-                        NavigationLink {
-                            BackupHealthView(snapshot: health, onScan: { Task { _ = await automaticBackup.backUpSelectedAlbumsNow() } })
-                        } label: {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Label("Backup Health", systemImage: "heart.text.square") .font(.headline)
-                                Text(health.nextAction).font(.subheadline).foregroundStyle(.secondary)
-                                if health.scope.isLimited { Text("Limited Photos access").font(.caption).foregroundStyle(.orange) }
-                            }.frame(maxWidth: .infinity, alignment: .leading).padding(20)
-                             .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 20))
-                        }.buttonStyle(.plain)
+                    if let manualRunMessage {
+                        Label(manualRunMessage, systemImage: "info.circle")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 4)
                     }
-                    if let reason = queue.admissionStatusReason {
-                        Label(reason, systemImage: "pause.circle").font(.footnote).foregroundStyle(.secondary)
-                    }
-                    NavigationLink("Backup Session Summary") { BackupSessionHistoryView() }
-                    quickActions
-                    BlackScreenBackupControls(onStart: onBlackScreen)
-                        .padding(20)
-                        .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     folderSummary
                     if !queue.items.isEmpty { recentActivity }
+                    backupTools
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 24)
+                .frame(maxWidth: 640)
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 28)
+                .frame(maxWidth: .infinity)
             }
             .background(BackupTheme.background)
             .navigationTitle("Photos Backup")
@@ -133,15 +118,10 @@ struct DashboardView: View {
         case .loading:
             banner(color: .blue, symbol: "hourglass", title: "Checking your account", message: "Just a moment…")
         case .disconnected:
-            Button(action: onConnect) {
-                banner(color: .orange, symbol: "person.crop.circle.badge.exclamationmark", title: "Connect Google Photos", message: "Sign in to start protecting your library", showsChevron: true)
-            }
-            .buttonStyle(.plain)
+            EmptyView()
         case .connected:
             if let warning = account.persistenceWarning {
-                banner(color: .orange, symbol: "key.slash", title: "Not saved to Keychain", message: warning, showsChevron: false)
-            } else if let reason = queue.pauseReason {
-                banner(color: .orange, symbol: "pause.circle.fill", title: "Backup paused", message: reason, showsChevron: false)
+                banner(color: .orange, symbol: "key.slash", title: "Sign-in isn’t saved", message: warning, showsChevron: false)
             }
         case .rejected(_, let reason):
             Button(action: onConnect) {
@@ -152,34 +132,71 @@ struct DashboardView: View {
     }
 
     private var backupHero: some View {
-        VStack(spacing: 16) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(backupStatus.title).font(.title2.bold())
-                    Text(backupStatus.detail).font(.subheadline).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(spacing: 8) {
+                Image(systemName: "cloud")
+                Text("GOOGLE PHOTOS").tracking(1.4)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(BackupTheme.blue)
+            .accessibilityElement(children: .combine)
+
+            HStack(alignment: .top, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(backupStatus.title)
+                        .font(.system(.title2, design: .rounded).weight(.bold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(backupStatus.detail)
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer()
-                ZStack {
-                    Circle().stroke(heroTint.opacity(0.14), lineWidth: 7)
-                    Circle()
-                        .trim(from: 0, to: heroProgress)
-                        .stroke(heroTint, style: StrokeStyle(lineWidth: 7, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                    Image(systemName: heroSymbol)
-                        .font(.title3.bold())
-                        .foregroundStyle(heroTint)
+                Spacer(minLength: 0)
+                if !dynamicTypeSize.isAccessibilitySize {
+                    ZStack {
+                        Circle().fill(heroTint.opacity(0.08))
+                        if !queue.isIdle && account.status.isUsable {
+                            Circle().stroke(heroTint.opacity(0.12), lineWidth: 4)
+                            Circle().trim(from: 0, to: heroProgress)
+                                .stroke(heroTint, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                        }
+                        Image(systemName: heroSymbol)
+                            .font(.system(size: 25, weight: .medium))
+                            .foregroundStyle(heroTint)
+                    }
+                    .frame(width: 64, height: 64)
+                    .accessibilityHidden(true)
                 }
-                .frame(width: 58, height: 58)
             }
 
-            Divider()
+            if account.status.isUsable {
+                HStack(alignment: .top, spacing: 8) {
+                    metric(value: queue.completedSourceCount.formatted(), label: "Backed up")
+                    metric(value: queue.activeCount.formatted(), label: "Remaining")
+                    metric(value: queue.failedCount.formatted(), label: "Need attention")
+                }
+                .padding(.vertical, 16)
+                .background(BackupTheme.background.opacity(0.7),
+                            in: RoundedRectangle(cornerRadius: 16))
+            }
 
-            HStack {
-                metric(value: queue.completedSourceCount.formatted(), label: "Backed up")
-                Divider().frame(height: 38)
-                metric(value: selectedAlbums.count.formatted(), label: "Albums")
-                Divider().frame(height: 38)
-                metric(value: queue.activeCount.formatted(), label: "In queue")
+            if queue.pauseReason == nil, let reason = queue.admissionStatusReason {
+                Label(reason, systemImage: "pause.circle")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            primaryAction
+
+            if account.status.isUsable {
+                Button { showPicker = true } label: {
+                    Label("Choose individual photos", systemImage: "photo.badge.plus")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(BackupTheme.blue)
+                .padding(.top, -14)
             }
 
             if !queue.isIdle || queue.isUserPaused {
@@ -222,74 +239,94 @@ struct DashboardView: View {
                 }
             }
         }
-        .padding(20)
-        .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .backupCard(padding: 22)
     }
 
-    @ViewBuilder private var quickActions: some View {
-        if dynamicTypeSize.isAccessibilitySize {
-            VStack(spacing: 12) { albumBackupAction; photoPickerAction }
-                .buttonStyle(CardButtonStyle())
+    @ViewBuilder private var primaryAction: some View {
+        if !account.status.isUsable {
+            Button(action: onConnect) {
+                Label("Connect Google Photos", systemImage: "person.crop.circle.badge.plus")
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .disabled(account.status == .loading)
+        } else if selectedAlbums.isEmpty {
+            Button(action: onAlbums) {
+                Label("Choose Albums", systemImage: "rectangle.stack.badge.plus")
+            }
+            .buttonStyle(PrimaryButtonStyle())
         } else {
-            HStack(spacing: 12) { albumBackupAction; photoPickerAction }
-                .buttonStyle(CardButtonStyle())
+            Button(action: backUpSelectedAlbums) {
+                Label(isStartingManualRun ? "Checking albums…" : "Back Up Now",
+                      systemImage: "arrow.up.circle")
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .disabled(isStartingManualRun || queue.isUserPaused)
         }
     }
 
-    private var albumBackupAction: some View {
-        let enabled = account.status.isUsable && !selectedAlbums.isEmpty
-            && !isStartingManualRun && !queue.isUserPaused
-        return Button(action: backUpSelectedAlbums) {
-            quickActionLabel(symbol: "arrow.up.circle.fill",
-                             title: isStartingManualRun ? "Checking…" : "Back Up Now",
-                             detail: backUpActionDetail,
-                             isEnabled: enabled)
+    private var backupTools: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if let health = automaticBackup.health {
+                NavigationLink {
+                    BackupHealthView(snapshot: health, onScan: {
+                        Task { _ = await automaticBackup.backUpSelectedAlbumsNow() }
+                    })
+                } label: {
+                    detailLink(symbol: "checkmark.shield", title: "Backup details",
+                               subtitle: health.scope.isLimited ? "Limited Photos access · Review coverage" : "What’s saved and what needs a check")
+                }
+                .buttonStyle(.plain)
+                Divider().padding(.leading, 48)
+            }
+            NavigationLink { BackupSessionHistoryView() } label: {
+                detailLink(symbol: "clock.arrow.circlepath", title: "Backup history",
+                           subtitle: "A summary of your recent backups")
+            }
+            .buttonStyle(.plain)
+            Divider().padding(.leading, 48)
+            DisclosureGroup {
+                BlackScreenBackupControls(onStart: onBlackScreen)
+                    .padding(.top, 12)
+            } label: {
+                HStack(spacing: 12) {
+                    FeatureIcon(symbol: "moon", size: 36)
+                    Text("Long backups").font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
+                .frame(minHeight: 44)
+            }
+            .tint(BackupTheme.blue)
         }
-        .disabled(!enabled)
+        .backupCard()
     }
 
-    private var backUpActionDetail: String {
-        if selectedAlbums.isEmpty { return "Choose albums first" }
-        if queue.isUserPaused { return "Backup is paused" }
-        let backedUp = selectedBackedUpCount
-        guard selectedItemCount > 0 else { return "\(selectedItemCount.formatted()) items" }
-        return "\(backedUp.formatted()) of \(selectedItemCount.formatted()) backed up"
-    }
-
-    /// Backed-up total for the selection, using the same "All Photos contains
-    /// everything" rule as `selectedItemCount` so the two agree.
-    private var selectedBackedUpCount: Int {
-        if let all = selectedAlbums.first(where: { $0.isAllPhotos }) {
-            return albums.backedUpCounts[all.id] ?? 0
+    private func detailLink(symbol: String, title: String, subtitle: String) -> some View {
+        HStack(spacing: 12) {
+            FeatureIcon(symbol: symbol, size: 36)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
         }
-        return selectedAlbums.reduce(0) { $0 + (albums.backedUpCounts[$1.id] ?? 0) }
-    }
-
-    private var photoPickerAction: some View {
-        let enabled = account.status.isUsable
-        return Button { showPicker = true } label: {
-            quickActionLabel(symbol: "photo.badge.plus", title: "Pick Photos", detail: "Manual backup", isEnabled: enabled)
-        }
-        .disabled(!enabled)
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
     }
 
     private var folderSummary: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Selected Albums").font(.headline)
+                Text("Your albums").font(.headline)
                 Spacer()
-                if preferences.automaticBackup {
-                    StatusPill(text: "Automatic", symbol: "arrow.triangle.2.circlepath", color: .green)
-                }
-            }
-            if let manualRunMessage {
-                Text(manualRunMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Button("Manage", action: onAlbums)
+                    .font(.subheadline.weight(.medium))
+                    .frame(minHeight: 44)
             }
             if selectedAlbums.isEmpty {
-                Text("No albums selected yet. Choose albums from the Albums tab.")
+                Text("Choose the albums you’d like to keep in Google Photos. You can change your selection anytime.")
                     .font(.subheadline).foregroundStyle(.secondary)
             } else {
                 ForEach(Array(selectedAlbums.prefix(4).enumerated()), id: \.element.id) { index, album in
@@ -301,10 +338,9 @@ struct DashboardView: View {
                             Text(progressLabel(for: album)).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Image(systemName: albums.backedUpCounts[album.id] == album.count
-                              ? "checkmark.circle.fill" : "circle.dashed")
-                            .foregroundStyle(albums.backedUpCounts[album.id] == album.count
-                                             ? Color.green : BackupTheme.blue)
+                        Image(systemName: "photo.on.rectangle")
+                            .foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
                     }
                 }
                 if selectedAlbums.count > 4 {
@@ -313,16 +349,20 @@ struct DashboardView: View {
                 }
             }
         }
-        .padding(18)
-        .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .backupCard()
     }
 
     private var recentActivity: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Recent Activity").font(.headline)
+            HStack {
+                Text("Recent uploads").font(.headline)
+                Spacer()
+                Button("View all", action: onActivity)
+                    .font(.subheadline.weight(.medium)).frame(minHeight: 44)
+            }
             ForEach(Array(queue.items.suffix(3).reversed())) { item in
                 HStack(spacing: 12) {
-                    FeatureIcon(symbol: symbol(item.state), color: tint(item.state), size: 40)
+                    ActivityThumbnail(source: item.source, symbol: symbol(item.state), tint: tint(item.state))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item.name).font(.subheadline.weight(.medium)).lineLimit(1)
                         Text(item.state.label).font(.caption).foregroundStyle(.secondary)
@@ -331,8 +371,7 @@ struct DashboardView: View {
                 }
             }
         }
-        .padding(18)
-        .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .backupCard()
     }
 
     private var accountToolbarItem: some View {
@@ -343,6 +382,7 @@ struct DashboardView: View {
                     .font(.caption.weight(.bold)).foregroundStyle(account.status.isUsable ? .white : .secondary)
             }
             .frame(width: 32, height: 32)
+            .frame(width: 44, height: 44)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -355,7 +395,7 @@ struct DashboardView: View {
             Image(systemName: symbol).font(.title3).foregroundStyle(color).frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                Text(message).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             if showsChevron { Image(systemName: "chevron.right").font(.caption.weight(.bold)).foregroundStyle(.tertiary) }
@@ -366,21 +406,12 @@ struct DashboardView: View {
 
     private func metric(value: String, label: String) -> some View {
         VStack(spacing: 3) {
-            Text(value).font(.headline.monospacedDigit())
+            Text(value).font(.system(.title2, design: .rounded).weight(.semibold).monospacedDigit())
             Text(label).font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
-    }
-
-    private func quickActionLabel(symbol: String, title: String, detail: String, isEnabled: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: symbol).font(.title2).foregroundStyle(isEnabled ? BackupTheme.blue : Color.secondary)
-            Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-            Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var backupStatus: DashboardBackupStatus {
@@ -397,14 +428,14 @@ struct DashboardView: View {
     private var heroTint: Color {
         if !account.status.isUsable || queue.pauseReason != nil { return .orange }
         if queue.failedCount > 0 { return .red }
-        return queue.isIdle ? .green : BackupTheme.blue
+        return BackupTheme.blue
     }
 
     private var heroSymbol: String {
         if !account.status.isUsable { return "link" }
         if queue.pauseReason != nil { return "pause.fill" }
         if queue.failedCount > 0 { return "exclamationmark" }
-        return queue.isIdle ? "checkmark" : "arrow.up"
+        return queue.isIdle ? "cloud" : "arrow.up"
     }
 
     private func progressLabel(for album: PhotoAlbum) -> String {

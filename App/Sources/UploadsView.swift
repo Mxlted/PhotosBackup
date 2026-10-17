@@ -27,29 +27,42 @@ struct UploadsView: View {
     var body: some View {
         NavigationView {
             List {
+                if !queue.items.isEmpty { overviewSection }
                 manualBackupSection
-                Section {
-                    BlackScreenBackupControls(onStart: onBlackScreen)
-                        .padding(.vertical, 4)
-                }
                 if let reason = queue.pauseReason { pausedSection(reason) }
                 else if let reason = queue.admissionStatusReason {
                     Section {
-                        Label("Backup Conditions", systemImage: "thermometer")
+                        Label("Waiting to continue", systemImage: "clock")
+                            .font(.subheadline.weight(.semibold))
                         Text(reason).font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 if let warning = queue.persistenceWarning { persistenceWarningSection(warning) }
                 if queue.items.isEmpty { emptySection }
                 else {
-                    queueManagementSection
                     browsingSection
                     activitySection
                 }
+                Section {
+                    BlackScreenBackupControls(onStart: onBlackScreen)
+                        .padding(.vertical, 4)
+                }
+                if !queue.items.isEmpty { activityHelpSection }
             }
             .listStyle(.insetGrouped)
+            .backupListBackground()
             .navigationTitle("Activity")
-            .searchable(text: $search, prompt: "Search displayed names")
+            .searchable(text: $search, prompt: "Search photos and videos")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if !queue.items.isEmpty {
+                        Menu { queueManagementActions } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .accessibilityLabel("Backup actions")
+                    }
+                }
+            }
             .sheet(isPresented: $showPicker) {
                 PhotoPicker { sources in enqueue(sources) }.ignoresSafeArea()
             }
@@ -84,17 +97,73 @@ struct UploadsView: View {
         Task { await automaticBackup.enqueueManualSelection(sources) }
     }
 
+    private var overviewSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 12) {
+                    FeatureIcon(symbol: queue.isIdle ? "tray" : "arrow.up.circle", size: 44)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(activityTitle).font(.title3.weight(.semibold))
+                        Text(activitySubtitle).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                if !queue.isIdle {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView(value: queue.overallFraction).tint(BackupTheme.blue)
+                        Text("\(queue.overallFraction.formatted(.percent.precision(.fractionLength(0)))) of current backup")
+                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                }
+                HStack(spacing: 0) {
+                    activityMetric("Remaining", value: queue.activeCount, color: BackupTheme.blue)
+                    Spacer(minLength: 12)
+                    activityMetric("Backed up", value: browser.counts[.completed, default: 0], color: .primary)
+                    Spacer(minLength: 12)
+                    activityMetric("Attention", value: queue.failedCount, color: queue.failedCount > 0 ? .orange : .secondary)
+                }
+            }
+            .backupCard()
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+        }
+    }
+
+    private var activityTitle: String {
+        if queue.pauseReason != nil { return "Backup is paused" }
+        if queue.activeCount > 0 { return "Your backup is in progress" }
+        if queue.failedCount > 0 { return "A few items need attention" }
+        return "No uploads waiting"
+    }
+
+    private var activitySubtitle: String {
+        if queue.pauseReason != nil { return "Your progress is here when you’re ready." }
+        if queue.activeCount > 0 { return "Follow your photos and videos below." }
+        if queue.failedCount > 0 { return "Open an item below to see what happened." }
+        return "Review your recent activity below."
+    }
+
+    private func activityMetric(_ title: String, value: Int, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(value.formatted()).font(.title2.weight(.semibold)).monospacedDigit().foregroundStyle(color)
+            Text(title).font(.caption).foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     private var manualBackupSection: some View {
         Section {
             Button { showPicker = true } label: {
                 HStack(spacing: 12) {
                     FeatureIcon(symbol: "photo.badge.plus", size: 42)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Choose Photos or Videos").font(.headline).foregroundStyle(.primary)
-                        Text("Back up to 50 items at once").font(.caption).foregroundStyle(.secondary)
+                        Text("Add photos or videos").font(.headline).foregroundStyle(.primary)
+                        Text("Choose up to 50 items to back up").font(.caption).foregroundStyle(.secondary)
                     }
+                    Spacer(minLength: 8)
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title3).foregroundStyle(BackupTheme.blue)
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, 8)
             }
             .buttonStyle(.plain)
             .disabled(!account.status.isUsable)
@@ -116,8 +185,9 @@ struct UploadsView: View {
         }
     }
 
-    private var queueManagementSection: some View {
-        Section("Queue Controls") {
+    @ViewBuilder
+    private var queueManagementActions: some View {
+        Group {
             if queue.activeCount > 0 || queue.isUserPaused {
                 if queue.isUserPaused {
                     Button {
@@ -147,7 +217,7 @@ struct UploadsView: View {
                 Button {
                     queue.retryAllFailed()
                 } label: {
-                    Label("Retry Failed Uploads", systemImage: "arrow.clockwise.circle")
+                    Label("Retry Items Needing Attention", systemImage: "arrow.clockwise.circle")
                 }
             }
 
@@ -155,7 +225,7 @@ struct UploadsView: View {
                 Button {
                     queue.clearFinished()
                 } label: {
-                    Label("Clear Finished Uploads", systemImage: "checkmark.circle")
+                    Label("Clear Finished Activity", systemImage: "checkmark.circle")
                 }
             }
         }
@@ -163,8 +233,8 @@ struct UploadsView: View {
 
     private func persistenceWarningSection(_ warning: String) -> some View {
         Section {
-            Label("Upload Progress Isn’t Saved", systemImage: "externaldrive.badge.exclamationmark")
-                .foregroundStyle(.orange)
+            Label("Progress couldn’t be saved", systemImage: "externaldrive.badge.exclamationmark")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
             Text(warning).font(.footnote).foregroundStyle(.secondary)
         }
     }
@@ -178,27 +248,15 @@ struct UploadsView: View {
 
     private var activitySection: some View {
         Section {
-            if !queue.isIdle {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Overall Progress").font(.subheadline.weight(.semibold))
-                        Spacer()
-                        Text(queue.overallFraction, format: .percent.precision(.fractionLength(0)))
-                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    }
-                    ProgressView(value: queue.overallFraction).tint(BackupTheme.blue)
-                }
-                .padding(.vertical, 6)
-            }
             if browser.rows.isEmpty {
-                Text("No items match this filter and search.").font(.footnote).foregroundStyle(.secondary)
+                Text("No matching photos or videos.").font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(browser.rows) { item in activityRow(item) }
         } header: {
             HStack {
-                Text("\(browser.rows.count) shown · \(browser.overallCount) total")
+                Text("Recent activity")
                 Spacer()
-                if !queue.isIdle { Text("\(queue.activeCount) remaining") }
+                Text("\(browser.rows.count) of \(browser.overallCount)")
             }
         } footer: {
             if queue.deferredForICloudCount > 0 {
@@ -213,15 +271,15 @@ struct UploadsView: View {
         Section {
             Picker("Show", selection: $filter) {
                 ForEach(ActivityFilter.allCases) { category in
-                    Text("\(category.rawValue) (\(browser.counts[category, default: 0]))").tag(category)
+                    Text("\(filterTitle(category)) (\(browser.counts[category, default: 0]))").tag(category)
                 }
             }
             if queue.failedCount > 0 {
-                Toggle("Select Failed Items", isOn: $selectingFailures)
+                Toggle("Select items needing attention", isOn: $selectingFailures)
                     .onChange(of: selectingFailures) { if !$0 { selectedFailures.removeAll() } }
             }
             if selectingFailures {
-                Button("Select Visible Failures") {
+                Button("Select All Shown") {
                     selectedFailures = Set(browser.rows.filter { ActivityFilter.failed.includes($0.state) }.map(\.id))
                 }
                 Button("Retry Selected (\(selectedFailures.count))") {
@@ -230,10 +288,29 @@ struct UploadsView: View {
                 }
                 .disabled(selectedFailures.isEmpty || !account.status.isUsable)
             }
-        } header: {
-            Text("Browse Activity")
-        } footer: {
-            Text("Filters and search change this list only. Completed counts refer to components, including originals and Live Photo motion. Manually chosen items bypass automatic album rules.")
+        }
+    }
+
+    private var activityHelpSection: some View {
+        Section {
+            DisclosureGroup("About this activity") {
+                Text("Each row is a file. Live Photo motion and original versions can appear separately, so this count may be higher than your number of photos.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Text("Filters and search only change this list. Photos you choose manually are included even when they don’t match your automatic backup rules.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            .font(.subheadline)
+        }
+    }
+
+    private func filterTitle(_ filter: ActivityFilter) -> String {
+        switch filter {
+        case .all: return "All activity"
+        case .pending: return "Waiting"
+        case .processing: return "In progress"
+        case .failed: return "Needs attention"
+        case .iCloud: return "Waiting for iCloud"
+        case .completed: return "Backed up"
         }
     }
 
@@ -257,38 +334,28 @@ struct UploadsView: View {
                 } label: {
                     Image(systemName: selectedFailures.contains(item.id) ? "checkmark.circle.fill" : "circle")
                         .foregroundStyle(BackupTheme.blue)
+                        .frame(minWidth: 44, minHeight: 44)
                 }
                 .buttonStyle(.borderless)
-                .accessibilityLabel("Select \(item.name)")
+                .accessibilityLabel("\(selectedFailures.contains(item.id) ? "Deselect" : "Select") \(item.name)")
                 .accessibilityValue(selectedFailures.contains(item.id) ? "Selected" : "Not selected")
             }
-            ActivityThumbnail(source: item.source, symbol: symbol(item.state), tint: tint(item.state))
-            VStack(alignment: .leading, spacing: 5) {
-                HStack {
-                    Text(item.name).font(.subheadline.weight(.medium)).lineLimit(2).truncationMode(.middle)
-                    Spacer()
-                    if item.byteCount > 0 {
-                        Text(item.byteCount.formatted(.byteCount(style: .file)))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+            if case .failed(let reason, _) = item.state {
+                Button {
+                    inspectedFailure = FailureDetail(id: item.id, name: item.name, reason: reason)
+                } label: {
+                    activityRowContent(item)
+                        .contentShape(Rectangle())
                 }
-                Text(item.state.label).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                if case .failed = item.state {
-                    // The reason above is clamped to two lines, and Google's
-                    // own explanation is usually past the clamp.
-                    Text("Tap for details").font(.caption2).foregroundStyle(BackupTheme.blue)
-                }
-                if let fraction = item.state.fraction, item.state.isWorking {
-                    ProgressView(value: fraction).tint(BackupTheme.blue)
-                }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .combine)
+                .accessibilityHint("Opens the full error message and retry options")
+            } else {
+                activityRowContent(item)
+                    .accessibilityElement(children: .combine)
             }
         }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            guard case .failed(let reason, _) = item.state else { return }
-            inspectedFailure = FailureDetail(id: item.id, name: item.name, reason: reason)
-        }
+        .padding(.vertical, 8)
         .swipeActions {
             if item.state.isFinished {
                 if item.state != .done && item.state != .alreadyBackedUp {
@@ -300,13 +367,39 @@ struct UploadsView: View {
         }
     }
 
+    private func activityRowContent(_ item: UploadItem) -> some View {
+        HStack(spacing: 12) {
+            ActivityThumbnail(source: item.source, symbol: symbol(item.state), tint: tint(item.state))
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(item.name).font(.subheadline.weight(.medium)).lineLimit(2).truncationMode(.middle)
+                    Spacer()
+                    if item.byteCount > 0 {
+                        Text(item.byteCount.formatted(.byteCount(style: .file)))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if case .failed = item.state {
+                    Label("Needs attention · View details", systemImage: "exclamationmark.circle")
+                        .font(.caption).foregroundStyle(.orange)
+                } else {
+                    Text(item.state.label).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+                if let fraction = item.state.fraction, item.state.isWorking {
+                    ProgressView(value: fraction).tint(BackupTheme.blue)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     /// The whole reason, selectable and copyable. A support report is only as
     /// good as the text the reporter can actually get out of the app.
     private func failureSheet(_ failure: FailureDetail) -> some View {
         NavigationView {
             List {
                 Section("Item") { Text(failure.name).font(.subheadline) }
-                Section("What Google said") {
+                Section("What happened") {
                     Text(failure.reason)
                         .font(.footnote)
                         .textSelection(.enabled)
@@ -327,7 +420,8 @@ struct UploadsView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Upload Failed")
+            .backupListBackground()
+            .navigationTitle("Upload Details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

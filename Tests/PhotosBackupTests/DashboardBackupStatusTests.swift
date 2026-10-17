@@ -5,7 +5,7 @@ final class DashboardBackupStatusTests: XCTestCase {
     func testPastCompletionsDoNotProveTheCurrentSelectionIsBackedUp() {
         let status = DashboardBackupStatus(accountUsable: true, pauseReason: nil,
                                            remaining: 0, failed: 0, completed: 500, hasSelectedAlbums: true)
-        XCTAssertEqual(status.title, "Queue is clear")
+        XCTAssertEqual(status.title, "No uploads waiting")
         XCTAssertEqual(status.detail, "No pending uploads. Use Back Up Now to check your selected albums.")
     }
 

@@ -23,8 +23,8 @@ without a desktop companion or hosted service.
 - Select albums from the local Photos library.
 - Queue individual photos, videos, or all items in selected albums.
 - Show hashing, duplicate-check, upload, and finalization progress per item.
-- Inspect **Backup Health** for the selected scope, scan freshness, remembered
-  completions, required components, unknown coverage, and actual Google confirmations.
+- Inspect **Backup Status** from **Home → Backup details** for the selected scope,
+  scan freshness, remembered completions, required components, unknown coverage, and actual Google confirmations.
 - Preview and apply photo/video, screenshot, screen-recording, and capture-date rules.
 - Optionally retain both the current edit and the unedited original.
 - Optionally gate new preparation by charging, battery, temperature, and free storage.
@@ -39,8 +39,8 @@ without a desktop companion or hosted service.
 - Show per-album backup progress, and re-upload assets edited after backup.
 - Back up an edited photo as it looks on the iPhone, the file the Google Photos
   app would upload itself, so Google Photos' Free up space recognises it.
-- With Back Up Live Photo Motion on, back up a Live Photo with its motion
-  attached, so it plays as a Live Photo and the Google Photos app's Free up
+- With **Include Live Photo motion** on under **Settings → Photos & videos**,
+  back up a Live Photo with its motion attached, so it plays as a Live Photo and the Google Photos app's Free up
   space offers it. Live Photos backed up as a still earlier get their motion
   queued when they are discovered within the selected albums and rules.
 - Back up a photo edited in the Google Photos app so that app counts it as
@@ -49,8 +49,8 @@ without a desktop companion or hosted service.
   in-between version, so it is uploaded in addition to the finished edit.
 - Upload in original quality or request Google's Storage Saver processing.
 - Choose how many uploads run at once, from 1 to 10.
-- Keep the app awake with **Black Screen Mode** on Home or Activity: a black
-  background, dim gray backup counts and status that move between screen regions,
+- Keep the app awake with **Dark screen** under **Home → Long backups** or in
+  Activity: a black background, dim gray backup counts and status that move between screen regions,
   or an entirely blank screen. Tap anywhere for details and controls.
 - Enforce Wi-Fi-only or Wi-Fi-and-cellular policy at queue and request level,
   cancelling in-flight background transfers when the allowed transport is lost.
@@ -83,7 +83,7 @@ Photos credential, and an authenticated `photosdata-pa` request succeeds.
 The Xcode project, app target, and scheme are named `PhotosBackup`; the
 user-facing app is named **Photos Backup**.
 
-Latest release: **0.4.0** ([releases](https://github.com/Mxlted/PhotosBackup/releases)).
+Latest release: **0.4.1** ([releases](https://github.com/Mxlted/PhotosBackup/releases)).
 Every push to `main` and pull request runs protocol tests on macOS and the
 offline suite on an iPhone simulator. CI explicitly excludes the 2 live tests.
 
@@ -107,21 +107,22 @@ claims to come from.
 
 ## Long, unattended backups
 
-Start **Back Up Now** or queue photos, then tap **Black Screen Mode** on Home or
-Activity. The app prevents auto-lock while this mode is visible and the app is
-active. Only compact statistics appear, jumping between six screen regions once
+Start **Back Up Now** or queue photos, then tap **Dark screen** in Activity or
+under **Home → Long backups**. The app prevents auto-lock while this mode is
+visible and the app is active. Only compact statistics appear, jumping between six screen regions once
 a minute without animation (or staying centered with Reduce Motion enabled).
-Tap anywhere to see full status, pause reasons, and controls. **Return to Black
-Screen** restores the minimal view. Turn off **Show Status in Black Screen Mode**
+Tap anywhere to see full status, pause reasons, and controls. **Dark Screen**
+restores the minimal view. Turn off **Show progress on screen**
 for a completely blank resting screen, then tap anywhere to show details again.
 This preference is saved for future sessions. It stays black even after the
-queue finishes or pauses. **Restore Auto-Lock After Completion** is off by default;
+queue finishes or pauses. **Allow Auto-Lock when finished**
+under **Settings → Screen behavior** is off by default;
 when enabled it restores normal auto-lock after the session's discovery and required
 components settle, including a finish with failures. A standalone picker batch
 covers those selections; it does not establish coverage of selected albums.
 Pauses and incomplete scans do not trigger it, and newly arriving work reacquires
 the override. A compact session summary appears
-when you reveal the details. **Exit Black Screen** restores normal auto-lock
+when you reveal the details. **Return to App** restores normal auto-lock
 without stopping uploads; leaving the app also releases the override. The phone
 is still on and unlocked. OLED displays
 benefit from the black background; LCD displays still use a backlight. Screen
@@ -132,7 +133,7 @@ count, failures, queue progress, and pause reasons. A clear queue does not mean
 unselected or unscanned albums are backed up. System overlays are hidden on
 iOS 16+; iOS 15 may still show its home indicator.
 
-**Tips for Long Backups**, beside the mode button, covers these preparations:
+**Tips for longer backups**, below the mode button, covers these preparations:
 
 - Plug in, use reliable Wi-Fi, and keep the phone cool and uncovered. Heat can
   reduce performance ([Apple's temperature guidance](https://support.apple.com/en-us/118431)).
@@ -147,33 +148,33 @@ iOS 16+; iOS 15 may still show its home indicator.
   phone in one app. Set its Display Auto-Lock to Never and learn the exit steps
   first. Apple says emergency calls and Crash Detection are unavailable during
   Guided Access.
-- If the phone warms up or uploads hit rate limits, reduce **Simultaneous
-  Uploads**. More parallel uploads are not always faster.
+- If the phone warms up or uploads hit rate limits, reduce **Uploads at once**
+  under **Settings → Upload preferences**. More parallel uploads are not always faster.
 
 ## Backup health and unattended settings
 
-Open **Home → Backup Health** for coverage of the active account, selected albums,
-rules, accessible Photos items, and enabled media components. Limited access stays
+Open **Home → Backup details** to see **Backup Status** for the active account,
+selected albums, rules, accessible Photos items, and enabled media components. Limited access stays
 visible. A clear queue is not proof of library coverage; local remembered completions
 are distinct from dated Google confirmation. Coverage requires a matching scan after
 selection/library changes or relaunch.
 
-Use **Albums → Backup Rules** to preview inclusion/exclusion before applying. Both
-media types are included by default. Date boundaries include both chosen days in the
+Use **Albums → What to back up** to preview inclusion/exclusion before saving
+preferences. Both media types are included by default. Date boundaries include both chosen days in the
 saved timezone. A date rule excludes items with no capture date. Explicit picker
 selections bypass rules; already queued work is kept. A picker batch joining an
 unfinished album session does not replace the outstanding scope scan: use **Back
 Up Now** to complete it. Rules never delete media or successful history.
 
-**Settings → Unattended Backup** provides optional charging, battery, thermal and
+**Settings → Battery & device care** provides optional charging, battery, thermal and
 free-storage admission controls, all initially off. They resume eligible work when
 conditions recover without overriding your Pause or Stop. Storage protection reserves
 2 GiB for each unknown-size item plus 1 GiB headroom; unusually large media can exceed
 that estimate. Existing background-transfer copies remain protected.
 
-**Enable Backup Notifications** requests permission only when tapped. Notices cover
+**Turn on backup updates** requests permission only when tapped. Notices cover
 settled sessions, unresolved failures, and problems needing user action; no per-photo
-alerts are sent. **Backup Sessions** distinguishes uploaded assets, duplicates,
+alerts are sent. **Backup history** distinguishes uploaded assets, duplicates,
 components, failures, deferred items, and measured bytes. Active and waiting durations
 are unavailable rather than inferred from suspended time.
 
@@ -183,14 +184,15 @@ original/edit, rule, notification, and platform details.
 
 ## Reporting a problem
 
-Open **Settings → Support → Create Diagnostic Report**, tap **Generate
+Open **Settings → Help & troubleshooting → Create a support report**, tap **Generate
 Report**, then **Share or Save Report**. Attach the text file to a
 [GitHub issue](https://github.com/Mxlted/PhotosBackup/issues). The report
 opens with a short **What stands out** list that often explains the problem on
 its own. It leaves out credentials, account addresses, photo identifiers,
 filenames, media, and request URLs.
 
-**Diagnostics → Event Timeline** shows the same timeline inside the app. Crash
+**Settings → Help & troubleshooting → Technical details → Event Timeline**
+shows the same timeline inside the app. Crash
 details from iOS are included only when Share With App Developers is on
 (Settings → Privacy & Security → Analytics & Improvements); they arrive a day
 or so after the crash.
@@ -236,7 +238,8 @@ the project, and let Xcode manage signing.
 
 ### Test background execution
 
-Debug builds expose **Settings → Diagnostics → Simulate Background Run**. This
+Debug builds expose **Settings → Help & troubleshooting → Technical details →
+Simulate Background Run**. This
 runs the same scan/enqueue/wait path immediately and is the fastest normal test
 loop.
 
@@ -296,7 +299,7 @@ and AltStore buttons targeting this fork for deployments with GitHub Pages enabl
 ## Connect a Google account
 
 1. Install and launch Photos Backup.
-2. In onboarding (or Settings → Connect Account), tap **Connect Google Account**.
+2. In onboarding (or **Settings → Connect account**), tap **Connect Google account**.
 3. Sign in and accept Google's consent prompt in the in-app window. The page may
    remain on a spinner afterward; that is expected — the app captures the token
    and closes the window on its own.
@@ -342,9 +345,9 @@ Android master token → Photos access token → private Photos API
   that existing item. Any edit in Apple Photos makes a new file, which then
   counts once backed up.
 - By default an edited photo or video is backed up as it looks on the iPhone;
-  its original is retained remotely only if uploaded earlier. The opt-in **Keep
-  Originals of Edited Media** setting also uploads the original, including for
-  previously completed assets within the selected albums and rules. This can add
+  its original is retained remotely only if uploaded earlier. The opt-in **Include
+  unedited originals** setting under **Settings → Photos & videos** also uploads
+  the original, including for previously completed assets within the selected albums and rules. This can add
   files and consume more storage.
   Google may show versions separately, without reversible editing history.
   Identical Live Photo motion already attached to a different still is an explicit
@@ -361,8 +364,8 @@ Android master token → Photos access token → private Photos API
 - Background scans enqueue bounded batches of 250 components (an asset can require
   several components). The limit bounds queue admission, not how much a window
   uploads: the queue is durable, so whatever a window cannot
-  finish waits for the next one. Foreground scans and the manual Back Up Now and
-  Re-check Backups buttons queue the whole matching selection and its required
+  finish waits for the next one. Foreground scans and the manual **Back Up Now** and
+  **Check backed-up photos** buttons queue the whole matching selection and its required
   components at once, so the count they report is the full run and the queue's
   concurrency setting decides how much of it moves at a time.
   iOS 16+ background scans use a persistent PhotoKit change token; iOS 15 and
@@ -372,8 +375,8 @@ Android master token → Photos access token → private Photos API
   Foreground and fallback scans compare saved asset revisions so edits are
   detected even without change history. A detected edit invalidates the current
   appearance, its motion, and its edit-base records, while retaining immutable
-  original records. An explicit Re-check Backups also rechecks original and
-  original-motion components when required by the enabled settings. The first
+  original records. **Settings → Help & troubleshooting → Check backed-up photos**
+  also rechecks original and original-motion components when required by the enabled settings. The first
   scan after upgrading from a version without revision tracking rechecks the
   selection against Google; existing matching bytes are not uploaded again.
 - Export, hashing, duplicate lookup, and upload initialization still need an

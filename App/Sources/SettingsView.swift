@@ -5,7 +5,6 @@ struct SettingsView: View {
     @EnvironmentObject private var account: PhotosAccount
     @EnvironmentObject private var queue: UploadQueue
     @EnvironmentObject private var preferences: BackupPreferences
-    @EnvironmentObject private var albums: PhotoAlbumStore
     @EnvironmentObject private var automaticBackup: AutomaticBackupCoordinator
 
     let showTutorial: () -> Void
@@ -20,21 +19,14 @@ struct SettingsView: View {
             Form {
                 accountSection
                 backupSection
-                Section {
-                    NavigationLink("Unattended Backup") { UnattendedBackupSettingsView(settings: $preferences.admissionSettings) }
-                }
+                deviceSection
                 BackupNotificationSettingsView()
-                Section("Black Screen Mode") {
-                    Toggle("Restore Auto-Lock After Completion", isOn: $preferences.restoreAutoLockAfterBackup)
-                    Text("Off by default. After a fully scanned session settles, including a finish with failures, normal auto-lock resumes. Pauses and incomplete scans keep the screen awake. This does not lock the device.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                automationSection
-                verifySection
-                supportSection
+                toolsSection
                 aboutSection
             }
+            .backupListBackground()
             .navigationTitle("Settings")
+            .tint(BackupTheme.blue)
             .confirmationDialog("Disconnect Google Photos?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
                 Button("Disconnect", role: .destructive) { Task { await account.disconnect() } }
                 Button("Cancel", role: .cancel) {}
@@ -46,7 +38,7 @@ struct SettingsView: View {
     }
 
     private var accountSection: some View {
-        Section("Google Photos Account") {
+        Section("Google Photos") {
             HStack(alignment: .top, spacing: 12) {
                 FeatureIcon(symbol: "person.crop.circle.fill", size: 44)
                 VStack(alignment: .leading, spacing: 3) {
@@ -55,7 +47,7 @@ struct SettingsView: View {
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(accountSubtitle)
-                        .font(.caption)
+                        .font(.subheadline)
                         .foregroundStyle(account.status.isUsable ? Color.green : Color.secondary)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -80,7 +72,7 @@ struct SettingsView: View {
                     }
                 } label: {
                     HStack {
-                        Text(account.verifying ? "Checking Connection…" : "Check Connection")
+                        Text(account.verifying ? "Checking connection…" : "Check connection")
                         Spacer()
                         if account.verifying {
                             ProgressView()
@@ -93,9 +85,9 @@ struct SettingsView: View {
                     }
                 }
                     .disabled(account.verifying)
-                Button("Disconnect Account", role: .destructive) { confirmDisconnect = true }
+                Button("Disconnect account", role: .destructive) { confirmDisconnect = true }
             } else {
-                Button("Connect Account") { showTutorial() }
+                Button("Connect account") { showTutorial() }
             }
 
             if case .failed(let reason) = connectionCheckResult, account.status.isUsable {
@@ -107,7 +99,7 @@ struct SettingsView: View {
 
             if account.status.isUsable, let warning = account.persistenceWarning {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("Not saved to Keychain", systemImage: "key.slash")
+                    Label("Account saved for this session only", systemImage: "key.slash")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.orange)
                     Text(warning + " The account works for this session but may need to be connected again after relaunch.")
@@ -125,8 +117,8 @@ struct SettingsView: View {
 
     private var backupSection: some View {
         Section {
-            Toggle("Automatic Backup", isOn: $preferences.automaticBackup)
-            Picker("Use Connection", selection: $preferences.connection) {
+            Toggle("Automatic backup", isOn: $preferences.automaticBackup)
+            Picker("Connection", selection: $preferences.connection) {
                 ForEach(BackupConnection.allCases) { option in Text(option.title).tag(option) }
             }
             if let reason = queue.networkPauseReason {
@@ -134,21 +126,151 @@ struct SettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.orange)
             }
-            Picker("Simultaneous Uploads", selection: $preferences.concurrentUploads) {
-                ForEach(Array(UploadQueue.concurrencyRange), id: \.self) { count in
-                    Text(count.formatted()).tag(count)
-                }
+            NavigationLink {
+                mediaSettings
+            } label: {
+                settingsLabel("Photos & videos", symbol: "photo.on.rectangle.angled", detail: "Live Photos and edited originals")
             }
-            Toggle("Storage Saver", isOn: $preferences.storageSaver)
-            Toggle("Count Against Storage Quota", isOn: $preferences.useQuota)
-            Toggle("Back Up Live Photo Motion", isOn: $preferences.backUpLivePhotoMotion)
-            Toggle("Keep Originals of Edited Media", isOn: $preferences.backUpOriginals)
-            Text("Also uploads the unedited original of edited photos and videos, including previously backed-up items. This may use additional storage. Originals and edits may appear as separate files in Google Photos; no reversible edit history is promised.")
-                .font(.footnote).foregroundStyle(.secondary)
+            NavigationLink {
+                uploadSettings
+            } label: {
+                settingsLabel("Upload preferences", symbol: "arrow.up.circle", detail: "Quality, storage and upload speed")
+            }
         } header: {
             Text("Backup")
         } footer: {
-            Text("More simultaneous uploads finish a large backup sooner. Each one stages a full-size copy on the device while it runs, so high values use more storage, battery and data at once — 2 suits most phones. Lowering it lets uploads already running finish first.\n\nStorage Saver asks Google Photos to reduce file size. With Count Against Storage Quota off, uploads identify as an older Pixel phone so they don't use your Google storage; the Google Photos app may then label them “Storage saver” even though the original file was kept. The file size, or Google Photos on the web, shows the real quality.\n\nBack Up Live Photo Motion attaches each Live Photo's motion to its photo, so it plays as a Live Photo in Google Photos and the Google Photos app's Free up space can remove it from this iPhone. It uploads the short video too, a few MB per Live Photo, and uses storage the same way the photo does. Live Photos backed up earlier get their motion added in the background.")
+            Text("Automatically checks your selected albums for new photos. iOS decides when background backups can run.")
+        }
+    }
+
+    private var mediaSettings: some View {
+        Form {
+            Section {
+                Toggle("Include Live Photo motion", isOn: $preferences.backUpLivePhotoMotion)
+            } header: {
+                Text("Live Photos")
+            } footer: {
+                Text("Keeps the short video with each Live Photo so it plays in Google Photos. Adds a few MB per photo, including photos already backed up.")
+            }
+            Section {
+                Toggle("Include unedited originals", isOn: $preferences.backUpOriginals)
+            } header: {
+                Text("Edited photos & videos")
+            } footer: {
+                Text("Saves the original as well as your edited version, including items already backed up. This may use more storage, and the versions may appear as separate files.")
+            }
+            Section {
+                DisclosureGroup("More about these options") {
+                    Text("Live Photo motion uses storage in the same way as its photo. Once backed up, Google Photos can include the Live Photo when you use Free up space on this iPhone.")
+                    Text("Including originals preserves a separate copy. It does not provide reversible edit history in Google Photos.")
+                }
+                .font(.subheadline)
+            }
+        }
+        .backupListBackground()
+        .navigationTitle("Photos & videos")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var uploadSettings: some View {
+        Form {
+            Section {
+                Toggle("Storage Saver", isOn: $preferences.storageSaver)
+            } header: {
+                Text("Photo quality")
+            } footer: {
+                Text("Asks Google Photos to reduce file sizes. Leave off to send the original files.")
+            }
+            Section {
+                Toggle("Use Google storage quota", isOn: $preferences.useQuota)
+                DisclosureGroup("How storage and quality work") {
+                    Text("With this option off, uploads identify as an older Pixel phone so they do not count against Google storage. This relies on an unofficial Google Photos connection.")
+                    Text("Google Photos may label these uploads “Storage saver” even when the original file was kept. Check the file size, or Google Photos on the web, for the actual quality.")
+                }
+                .font(.subheadline)
+            } header: {
+                Text("Google storage")
+            } footer: {
+                Text("When off, uploads use the older Pixel storage behavior. Google may change how this works.")
+            }
+            Section {
+                Picker("Uploads at once", selection: $preferences.concurrentUploads) {
+                    ForEach(Array(UploadQueue.concurrencyRange), id: \.self) { count in
+                        Text(count == 2 ? "2 · Recommended" : count.formatted()).tag(count)
+                    }
+                }
+                DisclosureGroup("About upload speed") {
+                    Text("More uploads can finish large backups sooner, but each needs a full-size temporary copy on your iPhone. Higher values use more storage, battery and data at once. Lowering the setting lets uploads already running finish first.")
+                }
+                .font(.subheadline)
+            } header: {
+                Text("Upload speed")
+            } footer: {
+                Text("Two uploads at once is a good balance for most iPhones.")
+            }
+        }
+        .backupListBackground()
+        .navigationTitle("Upload preferences")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var deviceSection: some View {
+        Section("Device") {
+            NavigationLink {
+                UnattendedBackupSettingsView(settings: $preferences.admissionSettings)
+            } label: {
+                settingsLabel("Battery & device care", symbol: "battery.100", detail: "Choose when backups should wait")
+            }
+            NavigationLink {
+                Form {
+                    Section {
+                        Toggle("Allow Auto-Lock when finished", isOn: $preferences.restoreAutoLockAfterBackup)
+                    } header: {
+                        Text("Dark screen")
+                    } footer: {
+                        Text("Allows normal Auto-Lock after a fully scanned backup finishes, even if some items fail. This does not lock the iPhone immediately. Paused or incomplete backups keep the screen awake.")
+                    }
+                }
+                .backupListBackground()
+                .navigationTitle("Screen behavior")
+                .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                settingsLabel("Screen behavior", symbol: "moon", detail: "Auto-Lock after a backup")
+            }
+        }
+    }
+
+    private var toolsSection: some View {
+        Section("Tools & help") {
+            NavigationLink {
+                Form { automationSection }
+                    .backupListBackground()
+                    .navigationTitle("Shortcuts")
+                    .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                settingsLabel("Shortcuts", symbol: "square.stack.3d.up", detail: "Back up with a personal automation")
+            }
+            NavigationLink {
+                BackupSessionHistoryView()
+            } label: {
+                settingsLabel("Backup history", symbol: "clock.arrow.circlepath")
+            }
+            NavigationLink {
+                StorageUsageView()
+            } label: {
+                settingsLabel("iPhone storage", symbol: "internaldrive")
+            }
+            NavigationLink {
+                Form {
+                    verifySection
+                    supportSection
+                }
+                .backupListBackground()
+                .navigationTitle("Help & troubleshooting")
+                .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                settingsLabel("Help & troubleshooting", symbol: "questionmark.circle")
+            }
         }
     }
 
@@ -158,7 +280,7 @@ struct SettingsView: View {
                 runVerification()
             } label: {
                 HStack {
-                    Text(isVerifying ? "Re-checking…" : "Re-check Backups")
+                    Label(isVerifying ? "Checking backups…" : "Check backed-up photos", systemImage: "checkmark.icloud")
                     Spacer()
                     if isVerifying { ProgressView() }
                 }
@@ -171,19 +293,39 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         } header: {
-            Text("Re-check")
+            Text("Check your backup")
         } footer: {
-            Text("Compares your selected albums against Google Photos again. Items still in the cloud finish quickly; anything deleted there is queued for upload again.")
+            Text("Checks your selected albums against Google Photos. Photos deleted from Google Photos are added to the backup again.")
         }
     }
 
     private var automationSection: some View {
         Section {
             ShortcutsSettingsRows()
-        } header: {
-            Text("Shortcuts")
+            DisclosureGroup("Set up an automation") {
+                Text("In Shortcuts, create a personal automation for a time of day, connecting to power, or joining your home Wi-Fi. Set it to run immediately and add the Back Up Photos action.")
+                    .font(.subheadline)
+            }
+            DisclosureGroup("What to expect") {
+                Text("Each run has about 30 seconds to find new photos in your selected albums and hand them to iOS for upload. It works even when Automatic backup is off, and respects your connection setting and Pause.")
+                Text("Photos stored only in iCloud wait until the app is open. iOS controls when uploads can continue in the background.")
+            }
+            .font(.subheadline)
         } footer: {
-            Text("In the Shortcuts app, create a personal automation — when the iPhone connects to power, at a time of day, or when it joins your home Wi-Fi — set it to run immediately, and add Back Up Photos. Each run has about 30 seconds: it finds new photos in the selected albums and hands them to iOS to upload in the background. It runs even with Automatic Backup off, and still follows Use Connection and Pause. Photos stored only in iCloud wait until the app is open.")
+            Text("Use a routine that suits you, such as connecting your iPhone to its charger.")
+        }
+    }
+
+    private func settingsLabel(_ title: String, symbol: String, detail: String? = nil) -> some View {
+        HStack(spacing: 12) {
+            FeatureIcon(symbol: symbol, size: 34)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).foregroundStyle(.primary)
+                if let detail {
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 3)
         }
     }
 
@@ -204,11 +346,9 @@ struct SettingsView: View {
 
     private var supportSection: some View {
         Section("Support") {
-            NavigationLink("Create Diagnostic Report") { DiagnosticReportView() }
-            NavigationLink("Backup Sessions") { BackupSessionHistoryView() }
-            NavigationLink("Storage") { StorageUsageView() }
-            NavigationLink("Diagnostics") { DiagnosticsView() }
-            Button("Run Onboarding Again") {
+            NavigationLink("Create a support report") { DiagnosticReportView() }
+            NavigationLink("Technical details") { DiagnosticsView() }
+            Button("Review setup") {
                 preferences.resetOnboarding()
             }
         }
@@ -219,7 +359,7 @@ struct SettingsView: View {
             LabeledRow("App", value: "Photos Backup")
             LabeledRow("Version", value: appVersion)
             LabeledRow("iOS", value: UIDevice.current.systemVersion)
-            LabeledRow("Core technology") {
+            LabeledRow("Open-source credits") {
                 Link("GPMC by xob0t", destination: gpmcURL)
             }
         }
@@ -236,7 +376,7 @@ struct SettingsView: View {
 
     private var accountSubtitle: String {
         switch account.status {
-        case .loading: return "Looking for a saved credential"
+        case .loading: return "Looking for your saved account"
         case .disconnected: return "Connect to start backing up"
         case .connected(_, let since): return "Connected · \(since.formatted(date: .abbreviated, time: .omitted))"
         case .rejected(_, let reason): return reason
@@ -258,12 +398,12 @@ private struct ShortcutsSettingsRows: View {
     var body: some View {
         Group {
             if #available(iOS 16.0, *) {
-                Label("Back Up Photos action", systemImage: "square.stack.3d.up.fill")
+                Label("Back Up Photos", systemImage: "square.stack.3d.up.fill")
                 Link("Open Shortcuts", destination: URL(string: "shortcuts://")!)
                 if let lastRun {
                     AutomaticRunRow(run: lastRun)
                 } else {
-                    Text("The action has not run yet.")
+                    Text("No automation runs yet.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

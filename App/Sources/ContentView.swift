@@ -37,7 +37,9 @@ private struct MainAppView: View {
             DashboardView(
                 onConnect: { showConnectionTutorial = true },
                 onAccount: { selectedTab = 3 },
-                onBlackScreen: { showBlackScreen = true }
+                onBlackScreen: { showBlackScreen = true },
+                onAlbums: { selectedTab = 1 },
+                onActivity: { selectedTab = 2 }
             )
                 .tabItem { Label("Home", systemImage: "house.fill") }
                 .tag(0)

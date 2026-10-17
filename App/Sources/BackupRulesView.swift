@@ -4,6 +4,7 @@ struct BackupRulesView: View {
     @EnvironmentObject private var preferences: BackupPreferences
     @EnvironmentObject private var albums: PhotoAlbumStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var draft = BackupSelectionRules()
     @State private var preview: BackupRulesPreview?
     @State private var isPreviewing = false
@@ -13,58 +14,42 @@ struct BackupRulesView: View {
                               rules: draft, authorization: albums.authorization.rawValue)
     }
 
+    private var timeZoneName: String {
+        draft.calendar.timeZone.localizedName(for: .generic, locale: .current) ?? draft.timeZoneIdentifier
+    }
+
     var body: some View {
-        Form {
-            Section {
-                Picker("Include", selection: $draft.media) {
-                    ForEach(BackupSelectionRules.Media.allCases) { Text($0.title).tag($0) }
-                }
-                Toggle("Exclude Screenshots", isOn: $draft.excludeScreenshots)
-                Toggle("Exclude Screen Recordings", isOn: $draft.excludeScreenRecordings)
-            } footer: {
-                Text("Uses Photos' media types. Imported recordings without that subtype remain included; filenames are never used to guess.")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("Fine-tune what’s included from your selected albums.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                mediaPreferences
+                datePreferences
+                previewCard
+                detailsCard
             }
-            Section {
-                Toggle("First Capture Day", isOn: Binding(get: { draft.startDate != nil }, set: {
-                    if $0 { draft.setFirstDay(Date()) } else { draft.startDate = nil }
-                }))
-                if draft.startDate != nil {
-                    DatePicker("From", selection: Binding(get: { draft.startDate ?? Date() }, set: { draft.setFirstDay($0) }), displayedComponents: .date)
-                }
-                Toggle("Last Capture Day", isOn: Binding(get: { draft.endDateExclusive != nil }, set: {
-                    if $0 { draft.setLastDay(Date()) } else { draft.endDateExclusive = nil }
-                }))
-                if let end = draft.endDateExclusive {
-                    DatePicker("Through", selection: Binding(get: { end.addingTimeInterval(-1) }, set: { draft.setLastDay($0) }), displayedComponents: .date)
-                }
-                if !draft.isValid { Text("The last day must be on or after the first day.").foregroundStyle(.red) }
-            } footer: {
-                Text("Both chosen days are included, using \(draft.timeZoneIdentifier). This timezone stays fixed after travel. Items without a capture date are excluded when a date boundary is set.")
-            }
-            .environment(\.timeZone, draft.calendar.timeZone)
-            Section("Preview of Selected Albums") {
-                if isPreviewing { ProgressView("Counting accessible items…") }
-                else if let preview {
-                    Label("\(preview.included) included", systemImage: "checkmark.circle")
-                    Label("\(preview.excluded) excluded", systemImage: "line.3.horizontal.decrease.circle")
-                    if preview.missingMetadata > 0 {
-                        Text("\(preview.missingMetadata) items have unavailable or unsupported metadata.").font(.footnote).foregroundStyle(.secondary)
-                    }
-                }
-                if albums.isLimited { Text("Limited Photos access: this preview covers only the items you allowed.").foregroundStyle(.orange) }
-                if preferences.selectedAlbumIDs.isEmpty { Text("Select albums to preview their contents.").foregroundStyle(.secondary) }
-            }
-            Section {
-                Button("Apply Rules") {
+            .padding(20)
+        }
+        .background(BackupTheme.background)
+        .navigationTitle("What to Back Up")
+        .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                Button("Save Preferences") {
                     preferences.selectionRules = draft
                     dismiss()
                 }
+                .buttonStyle(PrimaryButtonStyle())
                 .disabled(!draft.isValid || preview == nil || isPreviewing)
-            } footer: {
-                Text("Rules apply to future selected-album discovery. Work already queued is retained; stop it in Activity if needed. Explicit photo-picker selections bypass rules. Changes require a new scope scan; successful backup history and media are kept.")
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
             }
+            .background(BackupTheme.background)
         }
-        .navigationTitle("Backup Rules")
         .onAppear { draft = preferences.selectionRules }
         .task(id: previewScope.fingerprint) {
             preview = nil
@@ -75,5 +60,151 @@ struct BackupRulesView: View {
             preview = result
             isPreviewing = false
         }
+    }
+
+    private var mediaPreferences: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(title: "Photos & videos")
+            VStack(spacing: 16) {
+                if dynamicTypeSize > .large {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Include")
+                        mediaPicker
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    HStack(spacing: 8) {
+                        Text("Include").fixedSize()
+                        Spacer(minLength: 0)
+                        mediaPicker
+                            .fixedSize()
+                            .layoutPriority(1)
+                    }
+                }
+                Divider()
+                Toggle("Skip screenshots", isOn: $draft.excludeScreenshots)
+                Divider()
+                Toggle("Skip screen recordings", isOn: $draft.excludeScreenRecordings)
+            }
+            .font(.subheadline)
+            .tint(BackupTheme.blue)
+            .backupCard()
+        }
+    }
+
+    private var mediaPicker: some View {
+        Picker("Include", selection: $draft.media) {
+            ForEach(BackupSelectionRules.Media.allCases) { Text($0.title).tag($0) }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+    }
+
+    private var datePreferences: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(title: "Date range", subtitle: "Include all dates, or choose when photos were taken.")
+            VStack(alignment: .leading, spacing: 16) {
+                Toggle("Set a start date", isOn: Binding(get: { draft.startDate != nil }, set: {
+                    if $0 { draft.setFirstDay(Date()) } else { draft.startDate = nil }
+                }))
+                if draft.startDate != nil {
+                    DatePicker("From", selection: Binding(get: { draft.startDate ?? Date() }, set: { draft.setFirstDay($0) }), displayedComponents: .date)
+                }
+                Divider()
+                Toggle("Set an end date", isOn: Binding(get: { draft.endDateExclusive != nil }, set: {
+                    if $0 { draft.setLastDay(Date()) } else { draft.endDateExclusive = nil }
+                }))
+                if let end = draft.endDateExclusive {
+                    DatePicker("Through", selection: Binding(get: { end.addingTimeInterval(-1) }, set: { draft.setLastDay($0) }), displayedComponents: .date)
+                }
+                if !draft.isValid {
+                    Label("Choose an end date on or after the start date.", systemImage: "exclamationmark.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                } else if draft.startDate != nil || draft.endDateExclusive != nil {
+                    Text("The start and end days are both included.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.subheadline)
+            .tint(BackupTheme.blue)
+            .environment(\.timeZone, draft.calendar.timeZone)
+            .backupCard()
+        }
+    }
+
+    private var previewCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeading(title: "Preview", subtitle: "Based on your selected albums.")
+            VStack(alignment: .leading, spacing: 16) {
+                if preferences.selectedAlbumIDs.isEmpty {
+                    Label("Choose albums to see what will be included.", systemImage: "rectangle.stack")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else if !draft.isValid {
+                    Text("Update the date range to see your preview.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else if isPreviewing {
+                    ProgressView("Checking your albums…")
+                        .font(.subheadline)
+                } else if let preview {
+                    HStack(alignment: .top, spacing: 24) {
+                        previewCount(preview.included, title: "Included", symbol: "checkmark.circle", color: BackupTheme.blue)
+                        Divider()
+                        previewCount(preview.excluded, title: "Skipped", symbol: "minus.circle", color: .secondary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                    if preview.missingMetadata > 0 {
+                        Text("\(preview.missingMetadata.formatted()) items couldn’t be fully checked because their details are missing or unsupported.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if albums.isLimited {
+                    Label("This preview includes only the photos you’ve allowed access to.", systemImage: "info.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .backupCard()
+        }
+    }
+
+    private func previewCount(_ count: Int, title: String, symbol: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(count.formatted())
+                .font(.title2.weight(.semibold))
+                .monospacedDigit()
+            Label(title, systemImage: symbol)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var detailsCard: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Changes apply the next time your selected albums are checked. Photos already waiting to upload stay in Activity, where you can stop them.")
+                Text("Photos you add manually are always included. Your existing backups and backup history are kept.")
+                Text("Screenshots and screen recordings are identified by Photos. Imported recordings may still be included if Photos doesn’t recognize them.")
+                Text("Dates use \(timeZoneName), even when you travel. Photos without a capture date are skipped when a date range is set.")
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 12)
+        } label: {
+            Label("How these preferences work", systemImage: "info.circle")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.primary)
+        }
+        .tint(BackupTheme.blue)
+        .backupCard(padding: 16)
     }
 }

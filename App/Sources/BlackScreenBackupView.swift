@@ -39,7 +39,7 @@ struct BlackScreenBackupStatus {
     init(accountUsable: Bool, pauseReason: String?, remaining: Int, failed: Int, waitingForICloud: Int) {
         if !accountUsable {
             title = "Connect to back up"
-            detail = "Exit black screen to connect your Google Photos account."
+            detail = "Return to the app to connect your Google Photos account."
         } else if let pauseReason {
             title = "Backup paused"
             detail = pauseReason
@@ -47,13 +47,13 @@ struct BlackScreenBackupStatus {
             title = "Backing up"
             detail = waitingForICloud > 0
                 ? "Some items need to download from iCloud. Keep this app open."
-                : "Preparing, checking, and uploading your queued items."
+                : "Your photos and videos are being prepared and backed up."
         } else if failed > 0 {
             title = "Backup needs attention"
-            detail = "Exit black screen and open Activity to review failed uploads."
+            detail = "Open Activity to review the items that couldn’t be backed up."
         } else {
-            title = "Queue is clear"
-            detail = "No pending uploads. You can start a backup from Home or Activity."
+            title = "No uploads waiting"
+            detail = "You can start a backup from Home or add photos in Activity."
         }
     }
 }
@@ -63,26 +63,31 @@ struct BlackScreenBackupControls: View {
     @State private var showTips = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Button(action: onStart) {
-                Label("Black Screen Mode", systemImage: "moon.fill")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                    .contentShape(Rectangle())
+                HStack(spacing: 12) {
+                    FeatureIcon(symbol: "moon.fill", size: 40)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Dark screen").font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                        Text("Keep the app awake with a minimal display.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(BackupTheme.blue)
             .accessibilityHint("Shows dim backup progress and prevents auto-lock while the app stays open")
 
-            Text("Keeps this app awake with dim statistics or a completely black screen. Tap anywhere in the mode for details and controls.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            Button("Tips for Long Backups") { showTips = true }
-                .font(.footnote.weight(.medium))
-                .frame(minHeight: 44)
+            Button("Tips for longer backups") { showTips = true }
+                .font(.caption.weight(.medium))
+                .frame(minHeight: 36)
                 .buttonStyle(.plain)
                 .foregroundStyle(BackupTheme.blue)
+                .padding(.leading, 52)
         }
         .sheet(isPresented: $showTips) { BackupSessionTipsView() }
     }
@@ -147,8 +152,10 @@ struct BlackScreenBackupView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(status.title).fontWeight(.medium)
                         Text("\(queue.completedSourceCount.formatted()) backed up")
-                        Text("\(queue.activeCount.formatted()) in queue")
-                        Text("\(queue.failedCount.formatted()) need attention")
+                        Text("\(queue.activeCount.formatted()) remaining")
+                        if queue.failedCount > 0 {
+                            Text("\(queue.failedCount.formatted()) need attention")
+                        }
                     }
                     .font(.caption.monospacedDigit())
                     // Keep the glanceable block compact even at accessibility
@@ -171,7 +178,7 @@ struct BlackScreenBackupView: View {
             .ignoresSafeArea()
             .accessibilityLabel("Show backup details")
             .accessibilityValue(preferences.showBlackScreenStatus
-                ? "\(status.title). \(queue.completedSourceCount) backed up, \(queue.activeCount) in queue, \(queue.failedCount) need attention."
+                ? "\(status.title). \(queue.completedSourceCount) backed up, \(queue.activeCount) remaining, \(queue.failedCount) need attention."
                 : "Screen is blank. Backup stays active.")
             .accessibilityHint("Shows backup progress, display options, and the exit button")
             .accessibilityIdentifier("blackScreen.wake")
@@ -184,13 +191,22 @@ struct BlackScreenBackupView: View {
                 statusSummary
                 metrics
                 if let session = queue.backupSession {
-                    BackupSessionSummaryView(session: session).multilineTextAlignment(.leading)
+                    DisclosureGroup("This backup session") {
+                        BackupSessionSummaryView(session: session)
+                            .multilineTextAlignment(.leading)
+                            .padding(.top, 14)
+                    }
+                    .font(.subheadline)
+                    .tint(textColor)
                 }
                 if let reason = queue.admissionStatusReason { Text(reason).font(.footnote) }
 
                 if queue.activeCount > 0 {
-                    Text("Current queue: \(queue.overallFraction.formatted(.percent.precision(.fractionLength(0))))")
-                        .font(.footnote.monospacedDigit())
+                    VStack(spacing: 10) {
+                        ProgressView(value: queue.overallFraction).tint(textColor)
+                        Text("\(queue.overallFraction.formatted(.percent.precision(.fractionLength(0)))) of current backup")
+                            .font(.footnote.monospacedDigit())
+                    }
                 }
 
                 if let warning = queue.persistenceWarning {
@@ -200,11 +216,11 @@ struct BlackScreenBackupView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Toggle("Show Status in Black Screen Mode", isOn: $preferences.showBlackScreenStatus)
+                    Toggle("Show progress on screen", isOn: $preferences.showBlackScreenStatus)
                         .font(.subheadline)
                         .tint(Color(white: 0.32))
                         .accessibilityIdentifier("blackScreen.showStatus")
-                    Text("When off, returning to black screen hides all text. Tap anywhere to show details again.")
+                    Text("Turn off for a completely black screen. Tap anywhere to see these controls again.")
                         .font(.footnote)
                         .foregroundStyle(secondaryTextColor)
                 }
@@ -212,21 +228,22 @@ struct BlackScreenBackupView: View {
 
                 VStack(spacing: 12) {
                     Text(preferences.restoreAutoLockAfterBackup
-                         ? "Normal auto-lock resumes after this session settles. Incomplete scans and pauses keep the app awake."
-                         : "App stays awake until you exit this mode.\nKeep Photos Backup open and your phone unlocked.")
+                         ? "Auto-lock returns when this backup finishes. The app stays awake if a scan is unfinished or backup is paused."
+                         : "Keep the app open and your phone unlocked. Auto-lock returns when you leave this screen.")
                         .font(.footnote)
                         .foregroundStyle(secondaryTextColor)
                     Button { showingDetails = false } label: {
-                        Text("Return to Black Screen")
+                        Text("Dark Screen")
                             .font(.body.weight(.medium))
-                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .frame(maxWidth: .infinity, minHeight: 50)
                             .contentShape(Rectangle())
-                            .overlay(Capsule().stroke(Color(white: 0.2), lineWidth: 1))
+                            .background(Color(white: 0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color(white: 0.2), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("blackScreen.return")
                     Button { dismiss() } label: {
-                        Text("Exit Black Screen")
+                        Text("Return to App")
                             .font(.body.weight(.medium))
                             .frame(maxWidth: .infinity, minHeight: 44)
                             .contentShape(Rectangle())
@@ -252,10 +269,10 @@ struct BlackScreenBackupView: View {
 
     private var statusSummary: some View {
         VStack(spacing: 12) {
-            Text("BLACK SCREEN MODE")
-                .font(.caption.weight(.medium))
-                .tracking(2)
-                .foregroundStyle(secondaryTextColor)
+            Image(systemName: "moon")
+                .font(.system(size: 28, weight: .light))
+                .padding(.bottom, 4)
+            Text("Dark screen").font(.caption).foregroundStyle(secondaryTextColor)
             Text(status.title).font(.title2.weight(.medium))
             Text(status.detail)
                 .font(.subheadline)
@@ -266,11 +283,13 @@ struct BlackScreenBackupView: View {
 
     private var metrics: some View {
         VStack(spacing: 16) {
-            metric("Backed up · account total", value: queue.completedSourceCount)
-            metric("In queue", value: queue.activeCount)
+            metric("Backed up on this account", value: queue.completedSourceCount)
+            metric("Remaining uploads", value: queue.activeCount)
             metric("Needs attention", value: queue.failedCount)
         }
-        .font(.body.monospacedDigit())
+        .font(.subheadline.monospacedDigit())
+        .padding(20)
+        .background(Color(white: 0.055), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private func metric(_ label: String, value: Int) -> some View {
@@ -318,19 +337,24 @@ private struct BackupSessionTipsView: View {
         NavigationView {
             List {
                 Section("Before you leave") {
-                    tip("Start the backup first", "Use Back Up Now or queue photos, then enter Black Screen Mode. It keeps the app awake even when the queue is paused or finished. Tap anywhere for details, the option to hide all status, or the exit button. Exit the mode to restore normal auto-lock.")
-                    tip("Use power and reliable Wi-Fi", "Plug in your phone, use a strong Wi-Fi connection, and leave it on a cool, uncovered surface. Lower screen brightness in Control Center if needed. Black pixels save display power on OLED screens; the phone remains on and unlocked.")
-                    tip("Avoid power and data restrictions", "For a large backup, turn off Low Power Mode and Low Data Mode for the network you use. These settings can restrict background activity and iCloud Photos updates.")
+                    tip("Start your backup", "Choose Back Up Now or add photos in Activity, then open Dark Screen. Keep the app open and your phone unlocked. Tap anywhere to see progress or return to the app.")
+                    tip("Plug in and connect to Wi-Fi", "Use a reliable connection and leave your phone on a cool, uncovered surface. Lower the screen brightness in Control Center if needed.")
+                    tip("Check power and data settings", "Low Power Mode and Low Data Mode can slow background work and iCloud downloads. Consider turning them off while a large backup runs.")
                 }
                 Section("Reduce interruptions") {
-                    tip("Use a Focus", "Turn on Do Not Disturb or a custom Focus to silence unwanted notifications. Focus controls interruptions; it does not reserve processing power for this app.")
-                    tip("Pause competing transfers", "Pause large downloads, streaming, and other photo backup apps while this backup runs. You can temporarily turn off Background App Refresh for unrelated apps in iOS Settings. iOS manages other processes; this app cannot stop them or claim exclusive priority.")
-                    tip("Optional: Guided Access", "Settings → Accessibility → Guided Access can keep the phone in one app. Set its Display Auto-Lock to Never for this session. Learn how to end the session before starting; Apple says emergency calls and Crash Detection are unavailable during Guided Access.")
-                    Link("Apple’s Guided Access instructions", destination: URL(string: "https://support.apple.com/en-us/111795")!)
+                    tip("Silence interruptions", "Turn on Do Not Disturb or a Focus to quiet notifications while your backup runs.")
+                    tip("Give your connection some room", "Pause large downloads, streaming, or other photo backup apps if your connection is slow.")
+                    DisclosureGroup("Optional: keep the phone in one app") {
+                        Text("Guided Access is in Settings → Accessibility. Set its Display Auto-Lock to Never for this session and learn how to end it before starting. Emergency calls and Crash Detection are unavailable during Guided Access.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                            .padding(.vertical, 8)
+                        Link("Apple’s Guided Access instructions", destination: URL(string: "https://support.apple.com/en-us/111795")!)
+                            .font(.subheadline)
+                    }
                 }
                 Section("If progress slows") {
-                    tip("Keep the phone cool", "Heat can reduce performance. Avoid direct sun and covering the phone. If it warms up, reduce Simultaneous Uploads in Settings; more concurrent uploads are not always faster.")
-                    tip("Check Activity", "Network pauses, account issues, and failed uploads still need attention. Black Screen Mode shows their status, but does not bypass them. Locking the phone or switching apps ends the foreground session; background backup follows the usual iOS limits.")
+                    tip("Keep your phone cool", "Avoid direct sun and don’t cover your phone. If it gets warm, lower the number of simultaneous uploads in Settings.")
+                    tip("Check Activity", "Activity shows connection pauses and items that need attention. Locking your phone or switching apps may interrupt progress; iOS decides how long backup can continue in the background.")
                 }
             }
             .navigationTitle("Long Backups")

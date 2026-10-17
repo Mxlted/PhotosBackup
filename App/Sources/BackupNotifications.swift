@@ -97,14 +97,14 @@ final class BackupNotificationController: ObservableObject {
     }
     func requestPermission() async -> Bool {
         let allowed = await delivery.requestPermission()
-        permissionDescription = allowed ? "Session and action-required notifications are allowed."
-            : "Notifications are not allowed. You can enable them in iOS Settings; backup still works."
+        permissionDescription = allowed ? "Your iPhone allows backup notifications."
+            : "Allow notifications in iPhone Settings to receive updates. Your backups will continue without them."
         return allowed
     }
     func refreshPermissionDescription() async {
         permissionDescription = await delivery.isAuthorized()
-            ? "Notifications are allowed in iOS Settings."
-            : "Notifications are not allowed. Enable them in iOS Settings; backup still works."
+            ? "Your iPhone allows backup notifications."
+            : "Allow notifications in iPhone Settings to receive updates. Your backups will continue without them."
     }
     func activate(account: String?, session: UUID?) {
         if account != activeAccount {
@@ -184,18 +184,28 @@ final class BackupNotificationController: ObservableObject {
 struct BackupNotificationSettingsView: View {
     @EnvironmentObject private var preferences: BackupPreferences
     @EnvironmentObject private var notifications: BackupNotificationController
+
     var body: some View {
-        Section("Notifications") {
+        Section {
             if preferences.backupNotifications {
-                Toggle("Backup Session Notifications", isOn: $preferences.backupNotifications)
+                Toggle("Backup updates", isOn: $preferences.backupNotifications)
             } else {
-                Button("Enable Backup Notifications") {
+                Button {
                     Task { preferences.backupNotifications = await notifications.requestPermission() }
+                } label: {
+                    Label("Turn on backup updates", systemImage: "bell.badge")
                 }
             }
-            Text(notifications.permissionDescription).font(.footnote).foregroundStyle(.secondary)
-            Text("One notice for a settled session or a problem needing action. Individual uploads and ordinary network interruptions stay quiet.")
-                .font(.footnote).foregroundStyle(.secondary)
+            DisclosureGroup("Notification access") {
+                Text(notifications.permissionDescription)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .font(.subheadline)
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text("Get an update when a backup finishes or needs your help. Individual uploads and brief connection changes stay quiet.")
         }
         .task { await notifications.refreshPermissionDescription() }
     }

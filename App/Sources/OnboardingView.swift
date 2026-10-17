@@ -35,6 +35,7 @@ struct OnboardingView: View {
                 .animation(.easeInOut(duration: 0.25), value: step)
             }
         }
+        .tint(BackupTheme.blue)
         .fullScreenCover(isPresented: $showingConnect) {
             AccountConnectView(
                 onCaptured: { token in
@@ -61,46 +62,50 @@ struct OnboardingView: View {
     }
 
     private var topBar: some View {
-        HStack {
-            if step > 0 {
+        VStack(spacing: 12) {
+            HStack {
                 Button { withAnimation { step -= 1 } } label: {
                     Image(systemName: "chevron.left")
                         .font(.body.weight(.semibold))
                         .frame(width: 44, height: 44)
                 }
+                .disabled(step == 0)
+                .opacity(step == 0 ? 0 : 1)
                 .accessibilityLabel("Back")
-            } else {
-                Color.clear.frame(width: 44, height: 44)
+                Spacer()
+                Text("Set up Photos Backup")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(step + 1) of \(pageCount)")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 44)
             }
-            Spacer()
-            HStack(spacing: 6) {
-                ForEach(0..<pageCount, id: \.self) { index in
-                    Capsule()
-                        .fill(index == step ? BackupTheme.blue : Color.secondary.opacity(0.22))
-                        .frame(width: index == step ? 18 : 6, height: 6)
-                }
-            }
-            Spacer()
-            Color.clear.frame(width: 44, height: 34)
+            ProgressView(value: Double(step + 1), total: Double(pageCount))
+                .tint(BackupTheme.blue)
+                .accessibilityLabel("Setup progress")
+                .accessibilityValue("Step \(step + 1) of \(pageCount)")
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
+        .padding(.horizontal, 24)
+        .padding(.top, 4)
     }
 
     private var welcome: some View {
         onboardingPage(
             artwork: AnyView(
                 ZStack {
-                    Circle().fill(BackupTheme.blue.opacity(0.08)).frame(width: 230, height: 230)
-                    Circle().fill(BackupTheme.blue.opacity(0.10)).frame(width: 172, height: 172)
-                    AppMark(size: 112)
+                    Circle().fill(BackupTheme.blue.opacity(0.05)).frame(width: 204, height: 204)
+                    Circle().fill(BackupTheme.blue.opacity(0.07)).frame(width: 156, height: 156)
+                    AppMark(size: 96)
                 }
             ),
-            eyebrow: "PHOTOS BACKUP",
-            title: "Your memories, safely backed up",
-            message: "Choose the albums that matter. Photos Backup keeps them protected in your Google Photos library.",
-            primaryTitle: "Get Started",
+            eyebrow: "Welcome",
+            title: "Your photos, backed up.",
+            message: "Keep a copy of the moments that matter in Google Photos. Choose your albums, then let Photos Backup take it from there.",
+            primaryTitle: "Get started",
             primaryAction: next,
+            notice: "Experimental Google Photos connection. Google may change or interrupt access.",
             credit: "Built with GPMC by xob0t"
         )
     }
@@ -109,15 +114,15 @@ struct OnboardingView: View {
         onboardingPage(
             artwork: AnyView(
                 ZStack {
-                    Circle().fill(Color.pink.opacity(0.10)).frame(width: 220, height: 220)
+                    Circle().fill(BackupTheme.blue.opacity(0.07)).frame(width: 196, height: 196)
                     Image(systemName: "photo.on.rectangle.angled")
                         .font(.system(size: 78, weight: .medium))
-                        .foregroundStyle(.pink, .purple)
+                        .foregroundStyle(BackupTheme.blue)
                 }
             ),
-            eyebrow: "YOUR LIBRARY",
-            title: "Choose what to protect",
-            message: "Allow photo access so you can pick albums and back up individual photos. Your library stays private on this device.",
+            eyebrow: "Photo access",
+            title: "Your library, your choice",
+            message: "Allow photo access to choose albums and individual photos. Only the items you choose to back up are sent to Google Photos.",
             primaryTitle: permissionButtonTitle,
             primaryAction: {
                 Task {
@@ -140,16 +145,16 @@ struct OnboardingView: View {
         onboardingPage(
             artwork: AnyView(
                 ZStack {
-                    Circle().fill(BackupTheme.blue.opacity(0.10)).frame(width: 220, height: 220)
+                    Circle().fill(BackupTheme.blue.opacity(0.07)).frame(width: 196, height: 196)
                     Image(systemName: "person.badge.key.fill")
                         .font(.system(size: 74, weight: .medium))
                         .foregroundStyle(BackupTheme.blue)
                 }
             ),
-            eyebrow: "CONNECT YOUR ACCOUNT",
+            eyebrow: "Your Google account",
             title: "Sign in with Google",
-            message: "Connect your Google account to back up to Google Photos. Sign-in opens in a secure in-app window — sign in, then tap I agree.",
-            primaryTitle: "Connect Google Account",
+            message: "Choose the Google account where your backups will live. Sign in in the next window, then tap I agree.",
+            primaryTitle: "Connect Google account",
             primaryAction: { showingConnect = true }
         )
     }
@@ -160,7 +165,7 @@ struct OnboardingView: View {
                 VStack(spacing: 0) {
                     Spacer(minLength: 28)
                     ZStack {
-                        Circle().fill(connectionTint.opacity(0.10)).frame(width: 220, height: 220)
+                        Circle().fill(connectionTint.opacity(0.07)).frame(width: 196, height: 196)
                         Circle().stroke(connectionTint.opacity(0.18), lineWidth: 8).frame(width: 154, height: 154)
                         if probe.running {
                             ProgressView().controlSize(.large).tint(connectionTint).scaleEffect(1.35)
@@ -170,17 +175,17 @@ struct OnboardingView: View {
                         }
                     }
                     Spacer(minLength: 28)
-                    Text(connectionEyebrow).font(.caption.weight(.bold)).tracking(1.3).foregroundStyle(connectionTint)
-                    Text(connectionTitle).font(.largeTitle.bold()).multilineTextAlignment(.center).padding(.top, 9)
+                    Text(connectionEyebrow).font(.subheadline.weight(.semibold)).foregroundStyle(connectionTint)
+                    Text(connectionTitle).font(.system(.largeTitle, design: .rounded).weight(.semibold)).multilineTextAlignment(.center).padding(.top, 9)
                     Text(connectionMessage).font(.body).foregroundStyle(.secondary).multilineTextAlignment(.center).lineSpacing(3).padding(.top, 12)
                     Spacer(minLength: 28)
                     if !connectionVerified {
-                        Button(probe.running ? "Verifying…" : (connectionFailed ? "Try Again" : "Check Again")) {
+                        Button(probe.running ? "Checking…" : (connectionFailed ? "Try again" : "Check again")) {
                             if connectionFailed { showingConnect = true } else { verifyConnection() }
                         }
                         .buttonStyle(PrimaryButtonStyle()).disabled(probe.running)
                         if !probe.running {
-                            Button("Connect a Different Account") { showingConnect = true }
+                            Button("Use a different account") { showingConnect = true }
                                 .font(.headline)
                                 .frame(minHeight: 44)
                                 .padding(.top, 8)
@@ -199,9 +204,9 @@ struct OnboardingView: View {
     private var chooseFolders: some View {
         VStack(spacing: 0) {
             VStack(spacing: 7) {
-                Text("CHOOSE ALBUMS").font(.caption.weight(.bold)).tracking(1.2).foregroundStyle(BackupTheme.blue)
-                Text("What should we back up?").font(.largeTitle.bold()).multilineTextAlignment(.center)
-                Text("You can change this anytime in Albums.")
+                Text("Your albums").font(.subheadline.weight(.semibold)).foregroundStyle(BackupTheme.blue)
+                Text("Choose your albums").font(.system(.largeTitle, design: .rounded).weight(.semibold)).multilineTextAlignment(.center)
+                Text("Pick the albums to back up. You can change these anytime.")
                     .font(.body).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 24)
@@ -211,10 +216,16 @@ struct OnboardingView: View {
                 if albums.canRead {
                     ScrollView {
                         LazyVStack(spacing: 10) {
-                            ForEach(albums.albums.prefix(12)) { album in
+                            ForEach(albums.albums) { album in
                                 AlbumSelectionRow(album: album, isSelected: preferences.selectedAlbumIDs.contains(album.id)) {
                                     preferences.toggle(albumID: album.id)
                                 }
+                            }
+                            if albums.isLoading {
+                                ProgressView("Loading albums…")
+                                    .padding(.vertical, 24)
+                            } else if albums.albums.isEmpty {
+                                EmptyState(symbol: "photo.on.rectangle", title: "No albums yet", message: "Add photos to your library, then choose albums from the Albums tab.")
                             }
                         }
                         .padding(20)
@@ -226,9 +237,9 @@ struct OnboardingView: View {
             }
 
             VStack(spacing: 10) {
-                Button(preferences.selectedAlbumIDs.isEmpty ? "Choose Later" : "Continue") { next() }
+                Button(preferences.selectedAlbumIDs.isEmpty ? "Choose later" : "Continue") { next() }
                     .buttonStyle(PrimaryButtonStyle())
-                Text("\(preferences.selectedAlbumIDs.count) selected")
+                Text(preferences.selectedAlbumIDs.isEmpty ? "You can choose albums later" : "\(preferences.selectedAlbumIDs.count) \(preferences.selectedAlbumIDs.count == 1 ? "album" : "albums") selected")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             .padding(20)
@@ -241,9 +252,9 @@ struct OnboardingView: View {
                 VStack(spacing: 0) {
                     Spacer(minLength: 30)
                     FeatureIcon(symbol: "wifi", size: 76)
-                    Text("When should we back up?")
-                        .font(.largeTitle.bold()).multilineTextAlignment(.center).padding(.top, 24)
-                    Text("Choose how Photos Backup uses your connection.")
+                    Text("Back up on your terms")
+                        .font(.system(.largeTitle, design: .rounded).weight(.semibold)).multilineTextAlignment(.center).padding(.top, 24)
+                    Text("Choose the connection that works for you.")
                         .font(.body).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(.top, 10)
 
                     VStack(spacing: 12) {
@@ -259,17 +270,24 @@ struct OnboardingView: View {
                                     Image(systemName: preferences.connection == option ? "checkmark.circle.fill" : "circle")
                                         .font(.title3).foregroundStyle(preferences.connection == option ? BackupTheme.blue : .secondary)
                                 }
-                                .padding(16)
-                                .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(preferences.connection == option ? BackupTheme.blue : .clear, lineWidth: 2))
+                                .backupCard(padding: 18)
+                                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(preferences.connection == option ? BackupTheme.blue.opacity(0.6) : .clear, lineWidth: 1.5))
                             }
+                            .buttonStyle(CardButtonStyle())
+                            .accessibilityAddTraits(preferences.connection == option ? .isSelected : [])
                         }
                     }
                     .padding(.top, 28)
 
-                    Toggle("Back up selected albums automatically", isOn: $preferences.automaticBackup)
-                        .font(.subheadline.weight(.medium))
-                        .padding(.top, 22)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Automatic backup", isOn: $preferences.automaticBackup)
+                            .font(.subheadline.weight(.semibold))
+                        Text("Checks your selected albums for new photos. iOS controls when backups can run in the background.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .backupCard(padding: 18)
+                    .padding(.top, 18)
                     Spacer(minLength: 28)
                     Button("Continue") { next() }.buttonStyle(PrimaryButtonStyle())
                 }
@@ -284,16 +302,16 @@ struct OnboardingView: View {
         onboardingPage(
             artwork: AnyView(
                 ZStack {
-                    Circle().fill(Color.green.opacity(0.11)).frame(width: 220, height: 220)
+                    Circle().fill(Color.green.opacity(0.08)).frame(width: 196, height: 196)
                     Image(systemName: "checkmark.icloud.fill")
                         .font(.system(size: 86, weight: .medium))
                         .foregroundStyle(.green)
                 }
             ),
-            eyebrow: "ALL SET",
-            title: "Your backup is ready",
+            eyebrow: "All set",
+            title: "You’re ready to begin",
             message: completionMessage,
-            primaryTitle: "Go to Photos Backup",
+            primaryTitle: "Open Photos Backup",
             primaryAction: finish
         )
     }
@@ -307,6 +325,7 @@ struct OnboardingView: View {
         primaryAction: @escaping () -> Void,
         secondaryTitle: String? = nil,
         secondaryAction: @escaping () -> Void = {},
+        notice: String? = nil,
         credit: String? = nil
     ) -> some View {
         GeometryReader { geometry in
@@ -315,9 +334,19 @@ struct OnboardingView: View {
                     Spacer(minLength: 28)
                     artwork
                     Spacer(minLength: 28)
-                    Text(eyebrow).font(.caption.weight(.bold)).tracking(1.3).foregroundStyle(BackupTheme.blue)
-                    Text(title).font(.largeTitle.bold()).multilineTextAlignment(.center).padding(.top, 9)
+                    Text(eyebrow).font(.subheadline.weight(.semibold)).foregroundStyle(BackupTheme.blue)
+                    Text(title).font(.system(.largeTitle, design: .rounded).weight(.semibold)).multilineTextAlignment(.center).padding(.top, 9)
                     Text(message).font(.body).foregroundStyle(.secondary).multilineTextAlignment(.center).lineSpacing(3).padding(.top, 12)
+                    if let notice {
+                        Text(notice)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(14)
+                            .frame(maxWidth: .infinity)
+                            .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .padding(.top, 20)
+                    }
                     Spacer(minLength: 28)
                     Button(primaryTitle, action: primaryAction).buttonStyle(PrimaryButtonStyle())
                     if let secondaryTitle {
@@ -347,15 +376,22 @@ struct OnboardingView: View {
         switch albums.authorization {
         case .authorized, .limited: return "Continue"
         case .denied, .restricted: return "Open Settings"
-        default: return "Allow Photo Access"
+        default: return "Allow photo access"
         }
     }
 
     private var completionMessage: String {
+        guard account.status.isUsable else {
+            return "Connect your Google account from Home when you’re ready to begin."
+        }
         let count = preferences.selectedAlbumIDs.count
-        return count == 0
-            ? "Your account is connected. You can choose albums from the Albums tab."
-            : "Your account is connected, and we’ll keep \(count) selected \(count == 1 ? "album" : "albums") protected."
+        guard count > 0 else {
+            return "Your Google account is connected. Choose albums from the Albums tab whenever you’re ready."
+        }
+        if preferences.automaticBackup {
+            return "Your Google account is connected and automatic backup is on for \(count) \(count == 1 ? "album" : "albums")."
+        }
+        return "Your Google account is connected and \(count) \(count == 1 ? "album is" : "albums are") selected. Start a backup whenever you’re ready."
     }
 
     private func next() { withAnimation { step = min(pageCount - 1, step + 1) } }
@@ -385,9 +421,9 @@ struct OnboardingView: View {
     }
 
     private var connectionEyebrow: String {
-        if connectionVerified { return "CONNECTION VERIFIED" }
-        if connectionFailed { return "COULDN’T CONNECT" }
-        return probe.running ? "VERIFYING ACCOUNT" : "WAITING TO CONNECT"
+        if connectionVerified { return "Account connected" }
+        if connectionFailed { return "Connection needs attention" }
+        return probe.running ? "Connecting to Google Photos" : "Your Google account"
     }
 
     private var connectionTitle: String {
@@ -397,13 +433,13 @@ struct OnboardingView: View {
     }
 
     private var connectionMessage: String {
-        if connectionVerified { return "Photos Backup verified your Google Photos account. You’re ready to continue." }
+        if connectionVerified { return "Your Google Photos account is ready. Next, choose what you’d like to back up." }
         if connectionFailed {
-            return "We received the sign-in, but couldn’t verify it. Tap Try Again, sign in, and tap I agree."
+            return "We couldn’t finish connecting to Google Photos. Try signing in again, then tap I agree."
         }
         return probe.running
-            ? "We securely captured your sign-in and are verifying your Google Photos access."
-            : "Sign in and tap I agree in the connect window. We’ll verify everything before continuing."
+            ? "Making sure your account can connect to Google Photos."
+            : "Sign in and tap I agree in the next window to finish connecting."
     }
 
     private func logState(_ id: String) -> ProbeStep.State? {
@@ -436,17 +472,26 @@ struct AlbumSelectionRow: View {
             HStack(spacing: 14) {
                 FeatureIcon(symbol: album.symbol, size: 44)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(album.title).font(.headline).foregroundStyle(.primary).lineLimit(1)
+                    Text(album.title)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(detail).font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title3).foregroundStyle(isSelected ? BackupTheme.blue : .secondary)
             }
-            .padding(14)
-            .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .backupCard(padding: 16)
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(isSelected ? BackupTheme.blue.opacity(0.55) : .clear, lineWidth: 1.5))
+            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CardButtonStyle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityHint(isSelected ? "Deselect album" : "Select album")
     }
 
     private var detail: String {

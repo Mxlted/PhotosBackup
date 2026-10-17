@@ -6,36 +6,66 @@ struct UnattendedBackupSettingsView: View {
     var body: some View {
         List {
             Section {
-                Toggle("Only While Charging", isOn: $settings.onlyWhileCharging)
-                Picker("Minimum Battery", selection: $settings.minimumBatteryPercent) {
-                    Text("No Minimum").tag(0)
+                HStack(alignment: .top, spacing: 14) {
+                    FeatureIcon(symbol: "leaf", size: 46)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("A little care for your iPhone")
+                            .font(.headline)
+                        Text("Let new backups wait when your battery, temperature or storage needs a break.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+
+            Section {
+                Toggle("Only while charging", isOn: $settings.onlyWhileCharging)
+                Picker("Minimum battery", selection: $settings.minimumBatteryPercent) {
+                    Text("No minimum").tag(0)
                     ForEach([10, 20, 30, 40, 50, 60, 70, 80, 90], id: \.self) { percent in
                         Text("\(percent)%").tag(percent)
                     }
                 }
+            } header: {
+                Text("Power")
             } footer: {
-                Text("The battery minimum applies while unplugged. After waiting, new work resumes five percentage points above the minimum, or when a charger is connected. Unavailable battery information waits when either rule requires it.")
+                Text("The battery minimum applies while unplugged. Connect a charger to continue sooner.")
             }
 
             Section {
-                Toggle("Reduce Work When Warm", isOn: $settings.reduceWhenHot)
+                Toggle("Slow down when warm", isOn: $settings.reduceWhenHot)
+            } header: {
+                Text("Temperature")
             } footer: {
-                Text("Runs one upload at a time while warm. New preparation waits in serious heat and resumes after one minute of cooling. Work already started is allowed to finish.")
+                Text("Uses one upload at a time while warm, and waits to prepare more photos if the iPhone gets too hot.")
             }
 
             Section {
-                Toggle("Protect Free Storage", isOn: $settings.protectFreeStorage)
-                NavigationLink("Storage and Cleanup") { StorageUsageView() }
+                Toggle("Keep free space available", isOn: $settings.protectFreeStorage)
+                NavigationLink("View storage & clean up") { StorageUsageView() }
+            } header: {
+                Text("Storage")
             } footer: {
-                Text("Keeps 1 GiB of free-space headroom and reserves space for concurrent preparation. Because Photos does not provide a reliable size before export, unknown items reserve 2 GiB each. Large items can exceed this estimate. Upload copies owned by background transfers are retained.")
+                Text("Checks available space before preparing photos and videos for upload.")
             }
 
-            Section("How these controls work") {
-                Text("All controls are optional and initially off. They apply to foreground, Shortcut, and background queue work. When conditions recover, eligible work continues without clearing your own Pause or Stop.")
-                Text("These controls admit new preparation. An upload already moving under iOS can finish. iOS still decides when background execution is available.")
+            Section {
+                DisclosureGroup("When backups continue") {
+                    Text("These optional controls apply while the app is open, during Shortcuts, and in the background. They never undo your own Pause or Stop. An upload already in progress can finish.")
+                    Text("After a low-battery pause, new work waits until the battery is five percentage points above your minimum, or a charger is connected. If battery information is unavailable, work waits when a battery rule needs it.")
+                    Text("After serious heat, new preparation resumes following one minute of cooling. iOS still decides when background work is available.")
+                }
+                DisclosureGroup("How free space is protected") {
+                    Text("Keeps 1 GiB of free space and reserves room for photos being prepared together. When a photo or video’s size is unknown, 2 GiB is reserved for it. Large files can need more than this estimate.")
+                    Text("Temporary copies still needed by background uploads are kept until those uploads finish.")
+                }
             }
+            .font(.subheadline)
         }
-        .navigationTitle("Unattended Backup")
+        .backupListBackground()
+        .navigationTitle("Battery & device care")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

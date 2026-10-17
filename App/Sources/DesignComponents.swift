@@ -1,21 +1,79 @@
 import SwiftUI
 
 enum BackupTheme {
-    static let blue = Color(uiColor: .systemBlue)
-    static let background = Color(uiColor: .systemGroupedBackground)
+    static let blue = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.48, green: 0.67, blue: 1, alpha: 1)
+            : UIColor(red: 0.19, green: 0.35, blue: 0.70, alpha: 1)
+    })
+    static let background = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? .systemGroupedBackground
+            : UIColor(red: 0.965, green: 0.965, blue: 0.95, alpha: 1)
+    })
     static let secondaryBackground = Color(uiColor: .secondarySystemGroupedBackground)
+    static let border = Color(uiColor: .separator).opacity(0.15)
+    // White button labels need a deeper fill than the adaptive text/link tint.
+    static let buttonFill = Color(red: 0.19, green: 0.35, blue: 0.70)
+}
+
+private struct BackupCard: ViewModifier {
+    let padding: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .padding(padding)
+            .background(BackupTheme.secondaryBackground,
+                        in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(BackupTheme.border, lineWidth: 1))
+    }
+}
+
+extension View {
+    func backupCard(padding: CGFloat = 20) -> some View {
+        modifier(BackupCard(padding: padding))
+    }
+
+    @ViewBuilder
+    func backupListBackground() -> some View {
+        if #available(iOS 16.0, *) {
+            self.scrollContentBackground(.hidden).background(BackupTheme.background)
+        } else {
+            self
+        }
+    }
+}
+
+struct SectionHeading: View {
+    let title: String
+    var subtitle: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.headline).foregroundStyle(.primary)
+            if let subtitle {
+                Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 struct PrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.headline)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 15)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
             .foregroundStyle(.white)
-            .background(BackupTheme.blue.opacity(configuration.isPressed ? 0.72 : 1))
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .background(isEnabled ? BackupTheme.buttonFill.opacity(configuration.isPressed ? 0.8 : 1)
+                        : Color(uiColor: .systemGray))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -43,6 +101,7 @@ struct StatusPill: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(color.opacity(0.12), in: Capsule())
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -57,6 +116,7 @@ struct FeatureIcon: View {
             .foregroundStyle(color)
             .frame(width: size, height: size)
             .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: size * 0.27, style: .continuous))
+            .accessibilityHidden(true)
     }
 }
 
@@ -65,14 +125,14 @@ struct AppMark: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
-                .fill(LinearGradient(colors: [BackupTheme.blue, BackupTheme.blue.opacity(0.82)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
+                .fill(LinearGradient(colors: [BackupTheme.blue, BackupTheme.blue.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing))
             Image(systemName: "photo.stack.fill")
                 .font(.system(size: size * 0.43, weight: .semibold))
                 .foregroundStyle(.white)
         }
         .frame(width: size, height: size)
-        .shadow(color: BackupTheme.blue.opacity(0.22), radius: 16, y: 8)
+        .shadow(color: BackupTheme.blue.opacity(0.16), radius: 20, y: 10)
         .accessibilityHidden(true)
     }
 }
@@ -272,12 +332,12 @@ struct EmptyState: View {
     let message: String
 
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: symbol)
-                .font(.system(size: 40, weight: .medium))
-                .foregroundStyle(.secondary)
-            Text(title).font(.headline)
-            Text(message).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        VStack(spacing: 14) {
+            FeatureIcon(symbol: symbol, size: 68)
+            Text(title).font(.title3.weight(.semibold))
+            Text(message).font(.subheadline).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 36)

@@ -15,8 +15,18 @@ struct FolderSelectionView: View {
     }
 
     private var filteredAlbums: [PhotoAlbum] {
-        guard !searchText.isEmpty else { return albums.albums }
-        return albums.albums.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return albums.albums }
+        return albums.albums.filter { $0.title.localizedCaseInsensitiveContains(query) }
+    }
+
+    private var selectionTitle: String {
+        if preferences.selectedAlbumIDs.contains(PhotoAlbum.allPhotosID) {
+            return albums.isLimited ? "All available photos" : "Your whole library"
+        }
+        let count = preferences.selectedAlbumIDs.count
+        if count == 0 { return "Choose your albums" }
+        return count == 1 ? "1 album selected" : "\(count.formatted()) albums selected"
     }
 
     var body: some View {
@@ -27,22 +37,17 @@ struct FolderSelectionView: View {
                 } else if !albums.canRead {
                     deniedState
                 } else if albums.isLoading {
-                    ProgressView("Loading albums…")
+                    ProgressView("Loading your albums…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if albums.albums.isEmpty {
-                    EmptyState(symbol: "rectangle.stack", title: "No albums found", message: "Albums from your Photos library will appear here.")
+                    EmptyState(symbol: "rectangle.stack", title: "Your albums will appear here", message: "Add photos to your library, then return here to choose what to back up.")
                 } else {
                     albumList
                 }
             }
             .background(BackupTheme.background)
             .navigationTitle("Albums")
-            .searchable(text: $searchText, prompt: "Search albums")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Text("\(preferences.selectedAlbumIDs.count) selected")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-            }
+            .searchable(text: $searchText, prompt: "Find an album")
             .onAppear {
                 albums.refreshInBackground()
                 refreshBackedUpCounts()
@@ -60,75 +65,114 @@ struct FolderSelectionView: View {
 
     private var albumList: some View {
         ScrollView {
-            LazyVStack(spacing: 10) {
+            LazyVStack(alignment: .leading, spacing: 20) {
+                selectionOverview
                 if albums.isLimited { limitedAccessBanner }
-                HStack(spacing: 10) {
-                    Image(systemName: preferences.automaticBackup ? "arrow.triangle.2.circlepath.circle.fill" : "pause.circle.fill")
-                        .foregroundStyle(preferences.automaticBackup ? .green : .orange)
-                    Text(preferences.automaticBackup ? "Selected albums back up automatically" : "Automatic backup is paused")
-                        .font(.subheadline.weight(.medium))
-                    Spacer()
-                }
-                .padding(14)
-                .background((preferences.automaticBackup ? Color.green : Color.orange).opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
-                .padding(.bottom, 4)
+                backupPreferencesLink
 
-                NavigationLink(destination: BackupRulesView()) {
-                    HStack {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Backup Rules").font(.subheadline.weight(.semibold))
-                            Text(preferences.selectionRules.summary).font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 12) {
+                    SectionHeading(title: "Albums to back up", subtitle: "Select All Photos for your library, or choose individual albums.")
+                    if filteredAlbums.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.title2)
+                                .foregroundStyle(.secondary)
+                            Text("No matching albums")
+                                .font(.headline)
+                            Text("Try a different name.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                         }
-                        Spacer()
-                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                    }
-                    .padding(14)
-                    .background(BackupTheme.secondaryBackground, in: RoundedRectangle(cornerRadius: 14))
-                }
-                .buttonStyle(.plain)
-
-                ForEach(filteredAlbums) { album in
-                    AlbumSelectionRow(album: album,
-                                      isSelected: preferences.selectedAlbumIDs.contains(album.id),
-                                      backedUpCount: albums.backedUpCounts[album.id]) {
-                        preferences.toggle(albumID: album.id)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
+                        .backupCard()
+                    } else {
+                        ForEach(filteredAlbums) { album in
+                            AlbumSelectionRow(album: album,
+                                              isSelected: preferences.selectedAlbumIDs.contains(album.id),
+                                              backedUpCount: albums.backedUpCounts[album.id]) {
+                                preferences.toggle(albumID: album.id)
+                            }
+                        }
                     }
                 }
             }
-            .padding(16)
+            .padding(20)
         }
     }
 
-    /// Under limited access every PhotoKit fetch is scoped to the assets the
-    /// user hand-picked, so "All Photos" can read as a few dozen items with no
-    /// explanation. Say so, and offer the way to change it.
-    private var limitedAccessBanner: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Image(systemName: "photo.badge.checkmark").foregroundStyle(.orange)
-                Text("Limited photo access").font(.subheadline.weight(.semibold))
-                Spacer()
+    private var selectionOverview: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 14) {
+                FeatureIcon(symbol: "photo.stack", size: 48)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(selectionTitle)
+                        .font(.title3.weight(.semibold))
+                    Text(preferences.selectedAlbumIDs.isEmpty
+                         ? "Keep the moments that matter backed up."
+                         : "These albums are checked for new photos using your backup preferences.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            Text("Only the photos you picked are visible to Photos Backup, so these counts do not cover your whole library.")
-                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            Label(preferences.automaticBackup ? "Automatic backup is on" : "Automatic backup is paused",
+                  systemImage: preferences.automaticBackup ? "arrow.triangle.2.circlepath" : "pause.circle")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(preferences.automaticBackup ? BackupTheme.blue : .secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .backupCard()
+    }
+
+    private var backupPreferencesLink: some View {
+        NavigationLink(destination: BackupRulesView()) {
+            HStack(spacing: 12) {
+                FeatureIcon(symbol: "slider.horizontal.3", size: 40)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("What to back up")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(preferences.selectionRules.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .backupCard(padding: 16)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Under limited access every PhotoKit fetch is scoped to the assets the
+    /// user hand-picked, so counts must not imply full-library coverage.
+    private var limitedAccessBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Some photos are hidden", systemImage: "photo.badge.checkmark")
+                .font(.subheadline.weight(.semibold))
+            Text("You’ve allowed access to selected photos. Album counts and backups include only those photos.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Change in Settings") {
+            Button("Manage photo access") {
                 if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
             }
-            .font(.footnote.weight(.semibold))
+            .font(.subheadline.weight(.semibold))
         }
-        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
-        .padding(.bottom, 4)
+        .backupCard()
     }
 
     private var permissionState: some View {
         VStack(spacing: 18) {
             Spacer()
-            EmptyState(symbol: "photo.on.rectangle.angled", title: "See your albums", message: "Allow photo access to choose which albums Photos Backup should protect.")
-            Button("Allow Photo Access") { Task { await albums.requestAccess() } }
+            EmptyState(symbol: "photo.on.rectangle.angled", title: "Choose what to protect", message: "Allow access to your photos, then pick the albums you’d like to back up.")
+            Button("Choose Photo Access") { Task { await albums.requestAccess() } }
                 .buttonStyle(PrimaryButtonStyle()).padding(.horizontal, 24)
             Spacer()
         }
@@ -137,7 +181,7 @@ struct FolderSelectionView: View {
     private var deniedState: some View {
         VStack(spacing: 18) {
             Spacer()
-            EmptyState(symbol: "photo.badge.exclamationmark", title: "Photo access is off", message: "Allow access in Settings to choose albums and back up photos.")
+            EmptyState(symbol: "photo.badge.exclamationmark", title: "Photo access is off", message: "Allow access in Settings to choose albums and back up your photos.")
             Button("Open Settings") {
                 if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
             }
