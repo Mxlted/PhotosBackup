@@ -435,13 +435,23 @@ Run the full offline suite using the same command as CI:
 ./Scripts/test.sh
 ```
 
-The script checks Xcode, regenerates the project, chooses an available iPhone
-simulator by UUID, and explicitly excludes live Google tests. It keeps simulator
-signing enabled for Keychain coverage; do not pass `CODE_SIGNING_ALLOWED=NO` to
-test runs. No paid signing identity is needed for local simulator signing.
-Build output and an Xcode result bundle are saved in a new
-`build/test-results/run.*` directory on every run. CI uploads these artifacts
-for seven days, including on failure.
+The script checks Xcode, chooses an available iPhone runtime matching the
+selected SDK's major version, waits for it to finish booting, and regenerates
+the project. Build and test execution run as separate phases with progress
+messages and deadlines (3 minutes to boot, 10 to build, and 5 to test). Tests
+run on the selected simulator without parallel clones and explicitly exclude
+live Google tests. Simulator signing stays enabled for Keychain coverage; do
+not pass `CODE_SIGNING_ALLOWED=NO` to test runs. No paid signing identity is
+needed for local simulator signing.
+
+Phase logs and Xcode result bundles are saved in a new
+`build/test-results/run.*` directory on every run, with simulator diagnostics
+on failure. CI uploads these artifacts for seven days, including on failure.
+Simulator selection and timeout regression tests can also run without Xcode:
+
+```sh
+python3 -B -m unittest discover -s Tests/ScriptTests -v
+```
 
 To choose a simulator explicitly:
 

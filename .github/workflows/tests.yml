@@ -38,7 +38,11 @@ jobs:
       - name: Test protocol core on macOS
         run: swift test
 
+      - name: Test simulator selection and timeouts
+        run: python3 -B -m unittest discover -s Tests/ScriptTests -v
+
       - name: Test app on an iPhone simulator
+        timeout-minutes: 20
         run: Scripts/test.sh
 
       - name: Upload test results and build log
