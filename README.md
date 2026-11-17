@@ -22,6 +22,9 @@ without a desktop companion or hosted service.
 - Exchange the token for a Google Photos credential entirely on the device.
 - Select albums from the local Photos library.
 - Queue individual photos, videos, or all items in selected albums.
+- Import photos and videos with **Activity → Add from Files**, including files
+  from iCloud Drive and other providers available in the Files picker. Local
+  upload copies survive restarts and retries; the source files are left in place.
 - Show hashing, duplicate-check, upload, and finalization progress per item.
 - Inspect **Backup Status** from **Home → Backup details** for the selected scope,
   scan freshness, remembered completions, required components, unknown coverage, and actual Google confirmations.
@@ -29,6 +32,8 @@ without a desktop companion or hosted service.
 - Optionally retain both the current edit and the unedited original.
 - Optionally gate new preparation by charging, battery, temperature, and free storage.
 - Filter and search Activity, view local thumbnails, and retry selected failures.
+  Large queues show current work, upcoming uploads, and recent completions;
+  **Show more activity** and search expose the rest.
 - Read durable, account-scoped session summaries and opt into meaningful notifications.
 - Avoid re-uploading media already present in Google Photos.
 - Retry transient failures, cancel work, and resume after reconnecting.
@@ -83,7 +88,7 @@ Photos credential, and an authenticated `photosdata-pa` request succeeds.
 The Xcode project, app target, and scheme are named `PhotosBackup`; the
 user-facing app is named **Photos Backup**.
 
-Latest release: **0.4.1** ([releases](https://github.com/Mxlted/PhotosBackup/releases)).
+Latest release: **0.5.0** ([releases](https://github.com/Mxlted/PhotosBackup/releases)).
 Every push to `main` and pull request runs protocol tests on macOS and the
 offline suite on an iPhone simulator. CI explicitly excludes the 2 live tests.
 
@@ -181,6 +186,27 @@ are unavailable rather than inferred from suspended time.
 See [backup semantics and limitations](docs/backup-semantics.md) and the
 [media-component model](docs/media-component-model.md) for migration, completion,
 original/edit, rule, notification, and platform details.
+
+## Uploading from Files
+
+Open **Activity → Add from Files**, select photos or videos, and confirm the
+selection. The Files picker can download items from iCloud Drive or another
+configured provider; that download follows the provider's own network behavior.
+Photos Backup's upload connection preference still controls sending them to Google.
+Photos library permission is not needed for these files.
+
+Each selected file is uploaded as provided, with its filename and embedded metadata
+preserved. Album rules and Photos-specific originals/motion options do not apply;
+separate image and video files are not automatically paired into Live Photos.
+Google's duplicate check and the selected upload quality still apply. Files uploads
+do not establish backup coverage for the Photos library.
+
+The app keeps a local copy while an item is queued or needs a retry. A successful
+backup, stopping its pending upload with **Stop Backup**, or clearing its finished
+Activity row removes that copy. **Cancel** beside the import progress stops adding
+files while leaving already queued uploads in place.
+Your source file remains untouched. Import errors identify the affected files;
+other readable files in the selection are still queued.
 
 ## Reporting a problem
 

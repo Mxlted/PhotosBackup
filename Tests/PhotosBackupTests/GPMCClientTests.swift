@@ -262,6 +262,82 @@ final class GPMCClientTests: XCTestCase {
         return url
     }
 
+    func testHashingDoesNotBlockAnotherUploadOnTheSharedClient() async throws {
+        StubProtocol.handler = Self.photosHandler(existingKey: "already-there")
+        let client = try GPMCClient(authData: Self.credential, session: StubProtocol.session())
+        let file = try scratchFile()
+        let entered = expectation(description: "first hash started")
+        let secondFinished = expectation(description: "second upload completed while first hash blocked")
+        let gate = DispatchSemaphore(value: 0)
+        let first = Task {
+            try await client.prepareUpload(file: file, filename: "first.jpg") { phase in
+                if case .hashing(let fraction) = phase, fraction == 0 {
+                    entered.fulfill()
+                    _ = gate.wait(timeout: .now() + 5)
+                }
+            }
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        let second = Task {
+            let result = try await client.prepareUpload(file: file, filename: "second.jpg") { _ in }
+            secondFinished.fulfill()
+            return result
+        }
+        await fulfillment(of: [secondFinished], timeout: 2)
+        gate.signal()
+        _ = try await first.value
+        _ = try await second.value
+    }
+
+    func testCancellingDetachedHashingDoesNotSendANetworkRequest() async throws {
+        let client = try GPMCClient(authData: Self.credential, session: StubProtocol.session())
+        let file = try scratchFile()
+        let entered = expectation(description: "hash started")
+        let gate = DispatchSemaphore(value: 0)
+        let work = Task {
+            try await client.prepareUpload(file: file, filename: "cancelled.jpg") { phase in
+                if case .hashing(let fraction) = phase, fraction == 0 {
+                    entered.fulfill()
+                    _ = gate.wait(timeout: .now() + 5)
+                }
+            }
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        work.cancel()
+        gate.signal()
+        do { _ = try await work.value; XCTFail("Expected cancellation") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(StubProtocol.seen.isEmpty)
+    }
+
+    @MainActor
+    func testFilesUploadsUseTheExistingUploadAndDuplicatePipelineWithoutPhotoKitVariants() async throws {
+        for duplicate in [false, true] {
+            StubProtocol.handler = Self.photosHandler(existingKey: duplicate ? "existing" : nil)
+            let client = try GPMCClient(authData: Self.credential, session: StubProtocol.session())
+            let original = try scratchFile(name: "from-files.jpg")
+            let file = try await MediaFileImporter.importFile(original)
+            addTeardownBlock { await MediaFileImporter.discard(file) }
+            // Provider originals can move or disappear after import.
+            try FileManager.default.removeItem(at: original)
+            let uploader = PhotosUploader(exporter: MediaExporter()) { client }
+            let queue = UploadQueue(worker: uploader.worker(), persistence: MemoryUploadQueuePersistence(),
+                                    checkpointCleaner: uploader.checkpointCleaner())
+            queue.activateAccount("files@example.com")
+            queue.options.requiresVariantMetadata = true
+            queue.enqueue([.importedFile(file)])
+            let expected: UploadItem.State = duplicate ? .alreadyBackedUp : .done
+            for _ in 0..<300 {
+                if queue.items.first?.state == expected && !FileManager.default.fileExists(atPath: file.url.path) { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            XCTAssertEqual(queue.items.first?.state, expected)
+            XCTAssertEqual(queue.items.first?.name, "from-files.jpg")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.url.path))
+            XCTAssertEqual(StubProtocol.seen.contains { $0.httpMethod == "PUT" }, !duplicate)
+        }
+    }
+
     func testUploadReportsPhasesInOrderAndReturnsTheCommittedKey() async throws {
         StubProtocol.handler = Self.photosHandler()
         let file = try scratchFile()

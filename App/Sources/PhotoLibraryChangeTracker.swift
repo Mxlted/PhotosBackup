@@ -166,6 +166,11 @@ final class PhotoLibraryChangeTracker: NSObject, ObservableObject, PHPhotoLibrar
         let edited = sources.filter { source in
             guard case .asset(let id) = source else { return false }
             guard let revision = revisions[id], revision.modified != nil else { return true }
+            // PhotoKit also changes modificationDate for favourites, album
+            // moves and analysis. An unchanged unedited asset still uploads
+            // the same immutable original. Edits and reverts remain checked.
+            if let old = previous[id], old.modified != nil,
+               !old.hasAdjustments, !revision.hasAdjustments { return false }
             return previous[id] != revision
         }
         // Retain revisions of assets outside the new scope. Advancing those

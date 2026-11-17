@@ -17,6 +17,20 @@ final class PhotoLibraryChangeTrackerTests: XCTestCase {
         .init(modified: Date(timeIntervalSince1970: time), hasAdjustments: true)
     }
 
+    func testMetadataChangesKeepUneditedBackupsButEditsAndRevertsAreRechecked() {
+        let (tracker, _) = tracker()
+        let original = PhotoLibraryChangeTracker.AssetRevision(modified: Date(timeIntervalSince1970: 1), hasAdjustments: false)
+        let metadataChange = PhotoLibraryChangeTracker.AssetRevision(modified: Date(timeIntervalSince1970: 2), hasAdjustments: false)
+        tracker.commit(tracker.makeScan(sources: [source], revisions: ["photo": original], context: context))
+        XCTAssertTrue(tracker.makeScan(sources: [source], revisions: ["photo": metadataChange], context: context).editedSources.isEmpty)
+        let edit = tracker.makeScan(sources: [source], revisions: ["photo": revision(3)], context: context)
+        XCTAssertEqual(edit.editedSources, [source])
+        tracker.commit(edit)
+        XCTAssertEqual(tracker.makeScan(sources: [source], revisions: ["photo": metadataChange], context: context).editedSources, [source])
+        XCTAssertEqual(tracker.makeScan(sources: [source], revisions: ["photo": revision(4)], context: context).editedSources, [source],
+                       "a second edit in the same editor must not be missed")
+    }
+
     func testFullScanDetectsAnEditAfterRelaunchWithoutChangeHistory() {
         let (tracker, url) = tracker()
         let first = tracker.makeScan(sources: [source], revisions: ["photo": revision(1)], context: context)

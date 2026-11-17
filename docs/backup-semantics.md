@@ -70,6 +70,23 @@ scan. Edits made while an asset is excluded are checked when it is included agai
 No rule or variant preference deletes local media, remote media, or valid completion
 history. Legacy edit and motion backfills now flow through scoped discovery.
 
+Files selections are independent single-file backups. They bypass album rules,
+need no Photos permission, and never imply original/edit/Live Photo pairing or
+selected-library coverage. The document picker imports images and movies; each
+readable selection is copied into protected, backup-excluded Application Support
+before it is queued. The source identity stores an import UUID and filename rather
+than an absolute app-container path. Pending and failed imports survive relaunch
+and storage cleanup. In-process ownership also protects copies made after a cleanup
+took its queue snapshot. Retry keeps the copy; successful completion, removing the
+row, or stopping its pending upload releases it without touching the provider's file.
+Cancel Import leaves already queued uploads in place. Stop and account changes
+invalidate the import's discovery owner so a late copy cannot enqueue new work.
+
+An unedited PhotoKit asset keeps its remembered backup when only its modification
+date changes: the original resource is immutable. Unknown revisions, edits, reverts,
+and subsequent edits still trigger a recheck. This comparison uses public metadata
+and does not infer an unchanged edit from the editor's name alone.
+
 ## Optional unattended controls
 
 All new admission restrictions default off. Charging-only and minimum-battery

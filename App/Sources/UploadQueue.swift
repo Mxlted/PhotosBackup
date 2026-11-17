@@ -87,6 +87,10 @@ struct UploadItem: Identifiable, Equatable, Sendable {
     init(id: UUID = UUID(), source: MediaSource, name: String = "Preparing…") {
         self.id = id; self.source = source; self.name = name
         byteCount = 0; state = .queued; attempts = 0
+        if case .importedFile(let file) = source {
+            self.name = file.filename
+            byteCount = file.byteCount
+        }
     }
 }
 
@@ -108,6 +112,7 @@ private extension MediaSource {
         switch self {
         case .asset(let identifier): return "asset:\(identifier)"
         case .file(let url): return "file:\(url.standardizedFileURL.path)"
+        case .importedFile(let file): return "import:" + file.id.uuidString
         case .picked: return nil
         case .livePhotoMotion(let identifier): return UploadQueue.motionKeyPrefix + identifier
         case .editBase(let identifier): return UploadQueue.editBaseKeyPrefix + identifier
@@ -238,6 +243,9 @@ final class UploadQueue: ObservableObject {
     /// instead of persisted as durable "skip this source" markers.
     private var discardsCancelledRows = false
     private var persistScheduled = false
+    private var persistTask: Task<Void, Never>?
+    private var lastPersistAt = Date.distantPast
+    static let persistMinInterval: TimeInterval = 1
     /// See `PreparationMarkerStoring`. Nil where the guard is not exercised.
     private let preparationMarkers: PreparationMarkerStoring?
     /// Rows between their start and a prepared checkpoint, mirrored to
@@ -391,7 +399,14 @@ final class UploadQueue: ObservableObject {
             ?? rateLimitPauseReason
             ?? admissionPauseReason
     }
-    var retainedStagingURLs: Set<URL> { Set(items.compactMap { $0.checkpoint?.fileURL }) }
+    var retainedStagingURLs: Set<URL> {
+        Set(items.flatMap { item -> [URL] in
+            var files = item.checkpoint.map { [$0.fileURL] } ?? []
+            if case .importedFile(let file) = item.source,
+               item.state != .done, item.state != .alreadyBackedUp { files.append(file.url) }
+            return files
+        })
+    }
     var retainedTransferIDs: Set<UUID> {
         Set(items.compactMap { item in item.checkpoint?.prepared == nil ? nil : item.id })
     }
@@ -529,7 +544,7 @@ final class UploadQueue: ObservableObject {
                 userCancelled.remove(id)
                 requeueCancelled.remove(id)
                 setState(.cancelled, at: index)
-                cleanCheckpoint(for: index)
+                cleanCheckpoint(for: index, discardingSource: true)
             }
         }
         // Only meaningful while in-flight rows are still settling; leaving it
@@ -656,6 +671,9 @@ final class UploadQueue: ObservableObject {
 
     func clearFinished() {
         let before = items.count
+        for index in items.indices where items[index].state.isFinished {
+            cleanCheckpoint(for: index, discardingSource: true)
+        }
         items.removeAll { $0.state.isFinished }
         rebuildDerivedState()
         persistNow()
@@ -802,7 +820,7 @@ final class UploadQueue: ObservableObject {
 
         if accountIdentifier != nil {
             persistNow()
-            for index in items.indices { cleanCheckpoint(for: index) }
+            for index in items.indices { cleanCheckpoint(for: index, discardingSource: true) }
             for task in running.values { task.cancel() }
         }
         discoveryOwners.removeAll()
@@ -1131,7 +1149,14 @@ final class UploadQueue: ObservableObject {
             ?? item.source.queueDeduplicationKey ?? item.id.uuidString
     }
 
-    private func refreshBackupSession() { persistNow() }
+    private func refreshBackupSession() {
+        // Session changes remain visible immediately. Ordinary progress can
+        // share a snapshot write, but a settled session must be durable before
+        // it triggers notifications or releases the idle-timer override.
+        let session = updatedBackupSession(durable: completionLedgerHealthy)
+        if session?.outcome.isComplete == true { persistNow() }
+        else { publishSession(session); persist() }
+    }
 
     private func updatedBackupSession(durable: Bool = true) -> BackupSession? {
         guard var session = backupSession else { return nil }
@@ -1313,6 +1338,7 @@ final class UploadQueue: ObservableObject {
             backupSession?.failedAssets.remove(sessionAssetKey(item))
             recordCompletion(for: items[index])
             persist()
+            cleanCheckpoint(for: index, discardingSource: true)
             if let followUps = followUpSources?(items[index].source), !followUps.isEmpty {
                 enqueue(followUps, skippingExisting: true)
             }
@@ -1323,7 +1349,7 @@ final class UploadQueue: ObservableObject {
             if userCancelled.remove(id) != nil {
                 requeueCancelled.remove(id)
                 setState(.cancelled, at: index)
-                cleanCheckpoint(for: index)
+                cleanCheckpoint(for: index, discardingSource: discardsCancelledRows)
                 if discardsCancelledRows {
                     items.remove(at: index)
                     rebuildDerivedState()
@@ -1539,18 +1565,21 @@ final class UploadQueue: ObservableObject {
         }
     }
 
-    /// Coalesce the snapshot write. `persist()` is called from every queue
-    /// event — described, each checkpoint, each finish — and each call encodes
-    /// the whole items array. Batching to one write per main-actor turn keeps
-    /// the durability guarantee (nothing yields between the mutation and the
-    /// flush) while collapsing the five or six writes an item used to cost.
+    /// Batch ordinary progress writes when completions have a healthy separate
+    /// ledger. Checkpoints, user actions and suspension still flush immediately.
     private func persist() {
-        guard persistence != nil, accountIdentifier != nil else { return }
+        guard let persistence, accountIdentifier != nil else { return }
+        if !completionLedgerHealthy { persistNow(); return }
         guard !persistScheduled else { return }
         persistScheduled = true
-        Task { @MainActor [weak self] in
-            guard let self, self.persistScheduled else { return }
-            self.persistScheduled = false
+        let wait = persistence.storesCompletionLedgerSeparately
+            ? max(0, Self.persistMinInterval - Date().timeIntervalSince(lastPersistAt)) : 0
+        persistTask = Task { @MainActor [weak self] in
+            if wait > 0 {
+                do { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+                catch { return }
+            }
+            guard !Task.isCancelled, let self, self.persistScheduled else { return }
             self.persistNow()
         }
     }
@@ -1559,7 +1588,10 @@ final class UploadQueue: ObservableObject {
     /// checkpoint hand-off before a background PUT starts, and anything that
     /// runs as the process is about to be suspended.
     private func persistNow() {
+        persistTask?.cancel()
+        persistTask = nil
         persistScheduled = false
+        lastPersistAt = Date()
         let candidateSession = updatedBackupSession(durable: completionLedgerHealthy)
         guard let accountIdentifier, let persistence else { publishSession(candidateSession); return }
         let storedItems = items.compactMap { item -> PersistedUploadItem? in
@@ -1643,12 +1675,22 @@ final class UploadQueue: ObservableObject {
         }
     }
 
-    private func cleanCheckpoint(for index: Int) {
-        guard let checkpoint = items[index].checkpoint else { return }
+    private func cleanCheckpoint(for index: Int, discardingSource: Bool = false) {
+        let checkpoint = items[index].checkpoint
         let id = items[index].id
+        let source = items[index].source
         items[index].checkpoint = nil
-        guard let checkpointCleaner else { return }
-        Task { await checkpointCleaner(id, checkpoint) }
+        let cleaner = checkpointCleaner
+        let imported: ImportedMediaFile? = {
+            if discardingSource, case .importedFile(let file) = source { return file }
+            return nil
+        }()
+        guard checkpoint != nil || imported != nil else { return }
+        Task {
+            // Stop a background transfer before removing the body it reads.
+            if let checkpoint, let cleaner { await cleaner(id, checkpoint) }
+            if let imported { await MediaFileImporter.discard(imported) }
+        }
     }
 
     // MARK: - Crash-loop guard

@@ -39,7 +39,7 @@ extension MediaSource {
         switch self {
         case .asset(let id), .livePhotoMotion(let id), .editBase(let id),
              .original(let id), .originalMotion(let id): return id
-        case .file, .picked: return nil
+        case .file, .importedFile, .picked: return nil
         }
     }
 
@@ -51,6 +51,7 @@ extension MediaSource {
         case .original(let id): return "original:" + id
         case .originalMotion(let id): return "originalmotion:" + id
         case .file(let url): return "file:" + url.standardizedFileURL.path
+        case .importedFile(let file): return "import:" + file.id.uuidString
         case .picked: return nil
         }
     }

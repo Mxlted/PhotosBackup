@@ -26,6 +26,31 @@ enum ActivityFilter: String, CaseIterable, Identifiable, Sendable {
 /// Pure browsing operations never write to the queue. Search uses only the
 /// already-displayed local name, never identifiers or diagnostic content.
 enum ActivityQuery {
+    static let pageSize = 200
+
+    /// Keep the default view useful during a large backup: active/attention
+    /// rows, the next waiting items, and recent completions. Filters and search
+    /// page through all matches; Show More expands either view.
+    static func visible(_ matches: [UploadItem], summarized: Bool, limit: Int) -> [UploadItem] {
+        guard summarized else { return Array(matches.prefix(limit)) }
+        let extra = max(0, limit - pageSize)
+        var queued: [Int] = []
+        var finished: [Int] = []
+        var working: [Int] = []
+        var other: [Int] = []
+        for (index, item) in matches.enumerated() {
+            switch item.state {
+            case .queued: queued.append(index)
+            case .done, .alreadyBackedUp: finished.append(index)
+            default:
+                if item.state.isWorking { working.append(index) }
+                else { other.append(index) }
+            }
+        }
+        let indices = IndexSet(working + queued.prefix(20 + extra) + finished.suffix(50 + extra) + other.prefix(limit))
+        return indices.map { matches[$0] }
+    }
+
     static func matching(_ items: [UploadItem], filter: ActivityFilter, search: String) -> [UploadItem] {
         let needle = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return items.filter { item in
@@ -46,16 +71,17 @@ final class ActivityBrowser: ObservableObject {
     @Published private(set) var rows: [UploadItem] = []
     @Published private(set) var counts: [ActivityFilter: Int] = [:]
     @Published private(set) var overallCount = 0
+    @Published private(set) var matchingCount = 0
     @Published private(set) var failedIDs: Set<UUID> = []
     private var task: Task<Void, Never>?
     private var revision = UUID()
 
-    func refresh(_ items: [UploadItem], filter: ActivityFilter, search: String) {
+    func refresh(_ items: [UploadItem], filter: ActivityFilter, search: String, limit: Int = ActivityQuery.pageSize) {
         task?.cancel()
         let revision = UUID()
         self.revision = revision
         task = Task {
-            let work = Task.detached(priority: .userInitiated) { () -> ([UploadItem], [ActivityFilter: Int], Set<UUID>)? in
+            let work = Task.detached(priority: .userInitiated) { () -> ([UploadItem], [ActivityFilter: Int], Set<UUID>, Int)? in
                 var counts: [ActivityFilter: Int] = [:]
                 var failures: Set<UUID> = []
                 var matches: [UploadItem] = []
@@ -70,7 +96,8 @@ final class ActivityBrowser: ObservableObject {
                         matches.append(item)
                     }
                 }
-                return (matches, counts, failures)
+                return (ActivityQuery.visible(matches, summarized: filter == .all && needle.isEmpty, limit: limit),
+                        counts, failures, matches.count)
             }
             let result = await withTaskCancellationHandler(operation: { await work.value }, onCancel: { work.cancel() })
             guard !Task.isCancelled, revision == self.revision, let result else { return }
@@ -78,6 +105,7 @@ final class ActivityBrowser: ObservableObject {
             counts = result.1
             failedIDs = result.2
             overallCount = items.count
+            matchingCount = result.3
         }
     }
 

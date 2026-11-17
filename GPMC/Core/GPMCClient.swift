@@ -422,7 +422,7 @@ actor GPMCClient {
     /// upload URL. No long-running body transfer happens in this method.
     func prepareUpload(file: URL, filename: String, modified: Date? = nil,
                        phase: @escaping @Sendable (UploadPhase) -> Void) async throws -> UploadPreparation {
-        let (hash, size) = try hashFile(file, phase: phase)
+        let (hash, size) = try await hashFile(file, phase: phase)
         phase(.checkingDuplicate)
         if let key = try await remoteMediaKey(sha1: hash) {
             return .alreadyBackedUp(mediaKey: key)
@@ -442,7 +442,7 @@ actor GPMCClient {
     /// to attach the motion to yet.
     func prepareMotionUpload(file: URL, filename: String, modified: Date? = nil, stillHash: Data,
                              phase: @escaping @Sendable (UploadPhase) -> Void) async throws -> UploadPreparation {
-        let (hash, size) = try hashFile(file, phase: phase)
+        let (hash, size) = try await hashFile(file, phase: phase)
         phase(.checkingDuplicate)
         if let key = try await remoteMediaKey(sha1: hash, asLivePhotoMotion: true) {
             // An edit can change only the still, leaving the original and
@@ -465,7 +465,19 @@ actor GPMCClient {
                                                    hash: hash, size: size, phase: phase))
     }
 
-    private func hashFile(_ file: URL, phase: @escaping @Sendable (UploadPhase) -> Void) throws -> (hash: Data, size: UInt64) {
+    /// Hashing must not hold the shared client actor while other uploads need
+    /// to check duplicates or finalize. Cancellation still stops the read loop.
+    private func hashFile(_ file: URL, phase: @escaping @Sendable (UploadPhase) -> Void) async throws -> (hash: Data, size: UInt64) {
+        let hashing = Task.detached(priority: .utility) { try Self.sha1(of: file, phase: phase) }
+        return try await withTaskCancellationHandler {
+            let result = try await hashing.value
+            try Task.checkCancellation()
+            return result
+        } onCancel: { hashing.cancel() }
+    }
+
+    private static func sha1(of file: URL, phase: @escaping @Sendable (UploadPhase) -> Void) throws -> (hash: Data, size: UInt64) {
+        try Task.checkCancellation()
         let declared = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
         guard declared > 0 else { throw GPMCError(message: "That item is empty; there is nothing to upload.") }
         phase(.hashing(fraction: 0))

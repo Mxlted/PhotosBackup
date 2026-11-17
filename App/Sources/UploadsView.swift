@@ -8,13 +8,16 @@ struct UploadsView: View {
     @EnvironmentObject private var automaticBackup: AutomaticBackupCoordinator
     let onBlackScreen: () -> Void
     @State private var showPicker = false
+    @State private var showFilePicker = false
     @State private var showingStopBackupConfirmation = false
     @State private var inspectedFailure: FailureDetail?
     @State private var filter: ActivityFilter = .all
     @State private var search = ""
+    @State private var visibleLimit = ActivityQuery.pageSize
     @State private var selectingFailures = false
     @State private var selectedFailures: Set<UUID> = []
     @StateObject private var browser = ActivityBrowser()
+    @StateObject private var fileImport = FileImportController()
 
     /// A failed row's full text, snapshotted when it is tapped. The row itself
     /// can be retried or cleared while the sheet is open.
@@ -66,7 +69,18 @@ struct UploadsView: View {
             .sheet(isPresented: $showPicker) {
                 PhotoPicker { sources in enqueue(sources) }.ignoresSafeArea()
             }
+            .sheet(isPresented: $showFilePicker) {
+                FilePicker { urls in
+                    showFilePicker = false
+                    Task { await fileImport.importFiles(urls, into: queue) }
+                }.ignoresSafeArea()
+            }
             .sheet(item: $inspectedFailure) { failure in failureSheet(failure) }
+            .alert("Files import", isPresented: Binding(
+                get: { fileImport.notice != nil }, set: { if !$0 { fileImport.notice = nil } }
+            )) {
+                Button("OK", role: .cancel) { fileImport.notice = nil }
+            } message: { Text(fileImport.notice ?? "") }
             .confirmationDialog(
                 "Stop all backups?",
                 isPresented: $showingStopBackupConfirmation,
@@ -80,10 +94,10 @@ struct UploadsView: View {
         }
         .navigationViewStyle(.stack)
         .onReceive(queue.$items.throttle(for: .milliseconds(300), scheduler: RunLoop.main, latest: true)) { items in
-            browser.refresh(items, filter: filter, search: search)
+            browser.refresh(items, filter: filter, search: search, limit: visibleLimit)
         }
-        .onChange(of: filter) { _ in refreshBrowser() }
-        .onChange(of: search) { _ in refreshBrowser() }
+        .onChange(of: filter) { _ in visibleLimit = ActivityQuery.pageSize; refreshBrowser() }
+        .onChange(of: search) { _ in visibleLimit = ActivityQuery.pageSize; refreshBrowser() }
         .onChange(of: browser.failedIDs) { selectedFailures.formIntersection($0) }
         .onDisappear { browser.stop() }
     }
@@ -167,8 +181,33 @@ struct UploadsView: View {
             }
             .buttonStyle(.plain)
             .disabled(!account.status.isUsable)
+            Button { showFilePicker = true } label: {
+                HStack(spacing: 12) {
+                    FeatureIcon(symbol: "folder.badge.plus", size: 42)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Add from Files").font(.headline).foregroundStyle(.primary)
+                        Text("Choose photos or videos from your files").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title3).foregroundStyle(BackupTheme.blue)
+                }
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .disabled(!account.status.isUsable || fileImport.progress != nil)
+            if let progress = fileImport.progress {
+                HStack(spacing: 12) {
+                    ProgressView()
+                    Text(progress).font(.subheadline).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel") { fileImport.cancel() }
+                        .accessibilityLabel("Cancel remaining file imports")
+                }
+            }
         } footer: {
             if !account.status.isUsable { Text("Connect a Google Photos account before starting a backup.") }
+            else { Text("Files uploads back up each selected file as it is. Your source files stay in place.") }
         }
     }
 
@@ -252,20 +291,30 @@ struct UploadsView: View {
                 Text("No matching photos or videos.").font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(browser.rows) { item in activityRow(item) }
+            if browser.rows.count < browser.matchingCount {
+                Button("Show more activity") {
+                    visibleLimit += ActivityQuery.pageSize
+                    refreshBrowser()
+                }
+            }
         } header: {
             HStack {
                 Text("Recent activity")
                 Spacer()
-                Text("\(browser.rows.count) of \(browser.overallCount)")
+                Text("\(browser.rows.count) of \(browser.matchingCount)")
             }
         } footer: {
+            if filter == .all, search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               browser.rows.count < browser.matchingCount {
+                Text("Showing current activity, upcoming uploads, and recent completions. Search or show more to find older items.")
+            }
             if queue.deferredForICloudCount > 0 {
                 Text("\(queue.deferredForICloudCount) items need to download from iCloud first. Keep the app open to finish them.")
             }
         }
     }
 
-    private func refreshBrowser() { browser.refresh(queue.items, filter: filter, search: search) }
+    private func refreshBrowser() { browser.refresh(queue.items, filter: filter, search: search, limit: visibleLimit) }
 
     private var browsingSection: some View {
         Section {

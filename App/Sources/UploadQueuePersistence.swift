@@ -5,6 +5,7 @@ import Foundation
 enum PersistedMediaSource: Codable, Equatable, Sendable {
     case asset(String)
     case file(String)
+    case importedFile(ImportedMediaFile)
 
     init?(_ source: MediaSource) {
         switch source {
@@ -15,6 +16,7 @@ enum PersistedMediaSource: Codable, Equatable, Sendable {
              .original(let identifier), .originalMotion(let identifier):
             self = .asset(identifier)
         case .file(let url): self = .file(url.standardizedFileURL.path)
+        case .importedFile(let file): self = .importedFile(file)
         case .picked: return nil
         }
     }
@@ -23,6 +25,7 @@ enum PersistedMediaSource: Codable, Equatable, Sendable {
         switch self {
         case .asset(let identifier): return .asset(localIdentifier: identifier)
         case .file(let path): return .file(URL(fileURLWithPath: path))
+        case .importedFile(let file): return .importedFile(file)
         }
     }
 }

@@ -17,6 +17,9 @@ enum MediaSource: Equatable, Sendable {
     case picked(PickedItem)
     /// An existing file. Used by tests and by anything that already staged one.
     case file(URL)
+    /// A durable, app-owned copy selected from Files. Retained for retries
+    /// until the queue completes or removes the item.
+    case importedFile(ImportedMediaFile)
     /// The motion of the Live Photo with this `PHAsset` identifier: its paired
     /// video, attached to the still already backed up so the item plays as a
     /// Live Photo and the Google Photos app's Free up space can offer it.
@@ -150,7 +153,7 @@ actor MediaExporter {
             at: Self.root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         ) else { return }
         for child in children where !retainedDirectories.contains(child.standardizedFileURL) {
-            try? FileManager.default.removeItem(at: child)
+            MediaFileImporter.removeIfUnprotected(child)
         }
     }
 
@@ -158,6 +161,8 @@ actor MediaExporter {
         switch source {
         case .file(let url):
             return try describe(url, filename: url.lastPathComponent, modified: nil, temporary: false)
+        case .importedFile(let file):
+            return try describe(file.url, filename: file.filename, modified: file.modified, temporary: false)
         case .asset(let identifier):
             return try await exportAsset(identifier, allowsNetworkAccess: allowsNetworkAccess)
         case .picked(let picked):

@@ -42,4 +42,30 @@ final class ActivityBrowserTests: XCTestCase {
         XCTAssertEqual(matches.map(\.id), items.filter { $0.state == .done && $0.name.contains("Photo 1") }.map(\.id))
         XCTAssertEqual(Set(items.map(\.id)).count, 20_000)
     }
+
+    func testDefaultWindowShowsActiveRowsUpcomingWorkAndRecentCompletions() {
+        let completed = (0..<1000).map { _ in item(.done) }
+        let active = [item(.uploading(fraction: 0.5)), item(.failed(reason: "Retry", retryable: true))]
+        let waiting = (0..<5000).map { _ in item(.queued) }
+        let all = completed + active + waiting
+        let visible = ActivityQuery.visible(all, summarized: true, limit: ActivityQuery.pageSize)
+        XCTAssertEqual(visible.map(\.id), (Array(completed.suffix(50)) + active + Array(waiting.prefix(20))).map(\.id))
+        let expanded = ActivityQuery.visible(all, summarized: true, limit: ActivityQuery.pageSize * 2)
+        XCTAssertTrue(Set(visible.map(\.id)).isSubset(of: Set(expanded.map(\.id))))
+        XCTAssertLessThan(expanded.count, all.count)
+        let manyFailures = (0..<1000).map { _ in item(.failed(reason: "Retry", retryable: true)) }
+        let current = item(.uploading(fraction: 0.2))
+        XCTAssertTrue(ActivityQuery.visible(manyFailures + [current], summarized: true, limit: 200).contains(current),
+                      "old failures must not hide the upload currently running")
+    }
+
+    func testSearchAndFiltersCanRevealRowsOmittedByTheDefaultWindow() {
+        let all = (0..<500).map { item(.done, name: "Photo \($0)") }
+        let matches = ActivityQuery.matching(all, filter: .completed, search: "Photo 1")
+        XCTAssertEqual(ActivityQuery.visible(matches, summarized: false, limit: 200), matches)
+        let page = ActivityQuery.visible(all, summarized: false, limit: 200)
+        let expanded = ActivityQuery.visible(all, summarized: false, limit: 400)
+        XCTAssertEqual(page.count, 200)
+        XCTAssertEqual(Array(expanded.prefix(200)), page)
+    }
 }
