@@ -92,9 +92,9 @@ Latest release: **0.5.0** ([releases](https://github.com/Mxlted/PhotosBackup/rel
 Every push to `main` and pull request runs protocol tests on macOS and the
 offline suite on an iPhone simulator. CI explicitly excludes the 2 live tests.
 
-Each release's `.ipa` is built by GitHub Actions from the tagged commit and
-attached with its SHA-256, so the binary can be checked against the source it
-claims to come from.
+Release `.ipa` files are normally built by GitHub Actions from the tagged
+commit and attached with their SHA-256 checksum. If a release is packaged
+locally, its release notes identify the source commit and toolchain used.
 
 ### App identity (since 0.0.2)
 
